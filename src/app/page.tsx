@@ -15,6 +15,15 @@ const INITIAL_AGENTS: Agent[] = [
   { id: 'main', name: '爪爪 - 本地启动中...', icon: Bot, color: 'text-indigo-500', capabilities: { read: true, write: true, exec: false, invite: false } }
 ];
 
+type AgentCapabilities = {
+  read: boolean;
+  write: boolean;
+  exec: boolean;
+  invite: boolean;
+};
+
+const DEFAULT_CAPABILITIES: AgentCapabilities = { read: true, write: true, exec: false, invite: false };
+
 export default function Chat() {
   const [agents, setAgents] = useState<Agent[]>(INITIAL_AGENTS);
   const [activeSession, setActiveSession] = useState<SessionType>({ type: 'agent', id: 'main' });
@@ -26,6 +35,7 @@ export default function Chat() {
   const [activeConfigFileName, setActiveConfigFileName] = useState<string | null>(null);
   const [basicConfigContent, setBasicConfigContent] = useState<string>('');
   const [isSavingConfig, setIsSavingConfig] = useState(false);
+  const [savingCapabilityAgentId, setSavingCapabilityAgentId] = useState<string | null>(null);
 
   const [crons, setCrons] = useState<CronTask[]>([]);
   const [isCronModalOpen, setIsCronModalOpen] = useState(false);
@@ -41,6 +51,42 @@ export default function Chat() {
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const lastTargetAgentRef = useRef<string>('');
+
+  const resolveGroupDefaultAgentId = () => {
+    if (!currentGroup) return 'main';
+    if (currentGroup.leaderId && currentGroup.members.includes(currentGroup.leaderId)) {
+      return currentGroup.leaderId;
+    }
+    return currentGroup.members[0] || 'main';
+  };
+
+  const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+  const resolveMentionedAgentId = (text: string): string | undefined => {
+    if (activeSession.type !== 'group' || !currentGroup || !text) return undefined;
+
+    let latestMatchIndex = -1;
+    let matchedAgentId: string | undefined;
+
+    for (const memberId of currentGroup.members) {
+      const ag = agents.find(a => a.id === memberId);
+      if (!ag) continue;
+
+      const candidates = [ag.name, ag.id].filter(Boolean);
+      for (const candidate of candidates) {
+        const pattern = new RegExp(`(^|\\s)@${escapeRegExp(candidate)}(?=\\s|$|[，。,.!?！？:：;；])`, 'g');
+        for (const match of text.matchAll(pattern)) {
+          const index = match.index ?? -1;
+          if (index > latestMatchIndex) {
+            latestMatchIndex = index;
+            matchedAgentId = ag.id;
+          }
+        }
+      }
+    }
+
+    return matchedAgentId;
+  };
   
   const currentGroup = activeSession.type === 'group' ? groups.find(g => g.id === activeSession.id) : null;
   const activeChannelId = activeSession.type === 'group' ? (currentGroup?.channelId || 'default') : globalChannelId;
@@ -78,10 +124,8 @@ export default function Chat() {
     setViewingFile(null);
   }, [activeSession.id]);
 
-  let mentionedAgentId = undefined;
-
   const { messages, setMessages, input, setInput, handleInputChange, handleSubmit, isLoading, append } = useChat({
-    id: activeSession.type === 'group' ? activeSession.id : activeChannelId,
+    id: activeSession.type === 'group' ? `group-channel:${activeChannelId}` : activeChannelId,
     api: '/api/chat',
     body: {
       channelId: activeChannelId,
@@ -94,7 +138,7 @@ export default function Chat() {
     }
   });
 
-  const sessionIdentifier = activeSession.type === 'group' ? activeSession.id : activeChannelId;
+  const sessionIdentifier = activeSession.type === 'group' ? `group-channel:${activeChannelId}` : activeChannelId;
 
   useEffect(() => {
     fetch(`/api/messages?sessionType=${activeSession.type}&id=${sessionIdentifier}`)
@@ -117,29 +161,25 @@ export default function Chat() {
     return () => clearTimeout(timeoutMsg);
   }, [messages, sessionIdentifier, activeSession.type]);
 
-  if (activeSession.type === 'group' && currentGroup) {
-    for (const memberId of currentGroup.members) {
-      const ag = agents.find(a => a.id === memberId);
-      if (ag && input.includes(`@${ag.name}`)) {
-        mentionedAgentId = ag.id;
-        break; 
-      }
-    }
-  }
-
-  const targetAgentId = mentionedAgentId 
-    ? mentionedAgentId 
-    : (activeSession.type === 'agent' ? activeSession.id : (currentGroup?.leaderId || currentGroup?.members[0] || 'main'));
+  const currentMentionedAgentId = resolveMentionedAgentId(input);
 
   const proxyHandleSubmit = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    lastTargetAgentRef.current = targetAgentId;
-    const targetAgent = agents.find(a => a.id === targetAgentId);
+
+    const latestInput = textareaRef.current?.value ?? input;
+    const mentionedInSubmit = resolveMentionedAgentId(latestInput);
+    const targetAgentIdForSubmit = mentionedInSubmit
+      ? mentionedInSubmit
+      : (activeSession.type === 'agent' ? activeSession.id : resolveGroupDefaultAgentId());
+
+    lastTargetAgentRef.current = targetAgentIdForSubmit;
+    const targetAgent = agents.find(a => a.id === targetAgentIdForSubmit);
+
     handleSubmit(e, {
       body: {
-        agentId: targetAgentId,
-        isMention: !!mentionedAgentId,
-        capabilities: targetAgent?.capabilities || { read: true, write: true, exec: false, invite: false }
+        agentId: targetAgentIdForSubmit,
+        isMention: !!mentionedInSubmit,
+        capabilities: targetAgent?.capabilities || DEFAULT_CAPABILITIES
       }
     });
   };
@@ -155,7 +195,12 @@ export default function Chat() {
             name: a.name,
             icon: ICON_MAP[a.iconName as keyof typeof ICON_MAP] || Bot,
             color: a.color || 'text-indigo-500',
-            capabilities: { read: true, write: true, exec: false, invite: false }
+            capabilities: {
+              read: !!a.capabilities?.read,
+              write: !!a.capabilities?.write,
+              exec: !!a.capabilities?.exec,
+              invite: !!a.capabilities?.invite,
+            }
           }));
           setAgents(loadedAgents);
           if (activeSession.type === 'agent' && !loadedAgents.find((a: any) => a.id === activeSession.id)) {
@@ -386,13 +431,36 @@ export default function Chat() {
     ? (agents.find(a => a.id === activeSession.id) || agents[0])
     : { name: currentGroup?.name || '未知群聊', id: currentGroup?.id, icon: Users, color: 'text-orange-500' };
 
-  const toggleAgentCapability = (agentId: string, cap: 'read' | 'write' | 'exec' | 'invite') => {
-    setAgents(agents.map(a => {
-      if (a.id === agentId && a.capabilities) {
-        return { ...a, capabilities: { ...a.capabilities, [cap]: !a.capabilities[cap] } };
+  const toggleAgentCapability = async (agentId: string, cap: 'read' | 'write' | 'exec' | 'invite') => {
+    if (savingCapabilityAgentId === agentId) return;
+
+    const currentAgent = agents.find(a => a.id === agentId);
+    if (!currentAgent || !currentAgent.capabilities) return;
+
+    const previousCapabilities = currentAgent.capabilities;
+    const nextCapabilities = { ...previousCapabilities, [cap]: !previousCapabilities[cap] };
+
+    setAgents(prev => prev.map(a => (a.id === agentId ? { ...a, capabilities: nextCapabilities } : a)));
+    setSavingCapabilityAgentId(agentId);
+
+    try {
+      const res = await fetch('/api/agents', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ agentId, capabilities: nextCapabilities })
+      });
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err?.error || 'Failed to persist capability changes');
       }
-      return a;
-    }));
+    } catch (e) {
+      console.error('Failed to persist capabilities', e);
+      setAgents(prev => prev.map(a => (a.id === agentId ? { ...a, capabilities: previousCapabilities } : a)));
+      alert('权限保存失败，已回滚本地修改。');
+    } finally {
+      setSavingCapabilityAgentId(null);
+    }
   };
 
   return (
@@ -449,6 +517,7 @@ export default function Chat() {
           loadAgentConfigFile={loadAgentConfigFile}
           saveAgentConfigFile={saveAgentConfigFile}
           toggleAgentCapability={toggleAgentCapability}
+          isUpdatingCapabilities={savingCapabilityAgentId === configAgentId}
         />
       ) : (
         <ChatArea 
@@ -465,7 +534,7 @@ export default function Chat() {
           crons={crons}
           messages={messages}
           isLoading={isLoading}
-          mentionedAgentId={mentionedAgentId}
+          mentionedAgentId={currentMentionedAgentId}
           renderUserTextWithMentions={renderUserTextWithMentions}
           messagesEndRef={messagesEndRef}
           workspaceFiles={workspaceFiles}

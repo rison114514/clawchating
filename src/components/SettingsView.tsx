@@ -15,6 +15,7 @@ interface SettingsViewProps {
   loadAgentConfigFile: (agentId: string, filename: string) => void;
   saveAgentConfigFile: (agentId: string) => void;
   toggleAgentCapability: (agentId: string, cap: 'read'|'write'|'exec'|'invite') => void;
+  isUpdatingCapabilities?: boolean;
 }
 
 export function SettingsView({
@@ -29,7 +30,8 @@ export function SettingsView({
   isSavingConfig,
   loadAgentConfigFile,
   saveAgentConfigFile,
-  toggleAgentCapability
+  toggleAgentCapability,
+  isUpdatingCapabilities = false,
 }: SettingsViewProps) {
   const agent = agents.find(a => a.id === configAgentId);
 
@@ -83,6 +85,9 @@ export function SettingsView({
             <div>
               <h4 className="text-lg font-semibold text-neutral-200 mb-2 mt-4">工作区操作权限</h4>
               <p className="text-sm text-neutral-400 mb-6">配置该 Agent 在系统中的本地文件读写与命令执行权限。</p>
+              {isUpdatingCapabilities && (
+                <p className="text-xs text-indigo-400/90 mb-4">正在写入 .openclaw/openclaw.json...</p>
+              )}
             </div>
             
             <div className="space-y-4">
@@ -98,7 +103,13 @@ export function SettingsView({
                     <div className={cn("w-6 h-6 rounded border flex items-center justify-center transition-colors shrink-0", isEnabled ? "bg-indigo-600 border-indigo-600 text-white" : "border-neutral-600 bg-neutral-800")}>
                       {isEnabled && <Check className="w-4 h-4" />}
                     </div>
-                    <input type="checkbox" className="hidden" checked={isEnabled} onChange={() => toggleAgentCapability(configAgentId, cap.key as 'read'|'write'|'exec'|'invite')} />
+                    <input
+                      type="checkbox"
+                      className="hidden"
+                      checked={isEnabled}
+                      disabled={isUpdatingCapabilities}
+                      onChange={() => toggleAgentCapability(configAgentId, cap.key as 'read'|'write'|'exec'|'invite')}
+                    />
                     <div>
                       <div className="text-base font-medium text-neutral-200 group-hover:text-white transition-colors">{cap.label}</div>
                       <div className="text-sm text-neutral-500 mt-1">{cap.desc}</div>

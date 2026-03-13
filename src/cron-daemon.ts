@@ -6,7 +6,7 @@ import { z } from 'zod';
 
 const openclaw = createOpenAI({
   baseURL: 'http://127.0.0.1:18789/v1',
-  apiKey: '94f85e69781806263838f80b1f89979c4af251b01d0a7530',
+  apiKey: process.env.OPENCLAW_API_KEY,
 });
 
 let isRunning = false;
