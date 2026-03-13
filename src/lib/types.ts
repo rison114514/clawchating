@@ -9,7 +9,8 @@ export type Agent = {
 export type Group = {
   id: string;
   name: string;
-  members: string[]; // Agent IDs
+  members: string[];
+  leaderId?: string; // Agent IDs
   channelId: string;
 };
 

@@ -1,10 +1,11 @@
 [
   {
-    "name": "游戏开发",
+    "name": "游戏开发测试",
     "members": [
-      "leader-rui"
+      "leader-rui",
+      "backend-lv"
     ],
-    "channelId": "game-development",
-    "id": "group-1773308839575"
+    "channelId": "group-project-alpha",
+    "id": "group-1773331671342"
   }
 ]

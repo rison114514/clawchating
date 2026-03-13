@@ -1,4 +1,4 @@
-import { FolderClosed, Clock, Users, ChevronRight, Plus } from 'lucide-react';
+import { FolderClosed, Clock, Users, ChevronRight, Plus, Crown, Trash2 } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { Agent, Group } from '../../lib/types';
 import { useState } from 'react';
@@ -11,6 +11,8 @@ interface RightSidebarProps {
   workspaceFileCount: number;
   cronTaskCount: number;
   onAddAgent: (agentId: string) => void;
+  onSetLeader: (agentId: string) => void;
+  onDeleteGroup: () => void;
 }
 
 export function RightSidebar({
@@ -20,7 +22,9 @@ export function RightSidebar({
   onOpenCrons,
   workspaceFileCount,
   cronTaskCount,
-  onAddAgent
+  onAddAgent,
+  onSetLeader,
+  onDeleteGroup
 }: RightSidebarProps) {
   const [showAddMenu, setShowAddMenu] = useState(false);
   const availableAgents = agents.filter(a => !currentGroup.members.includes(a.id));
@@ -38,12 +42,27 @@ export function RightSidebar({
             const ag = agents.find(a => a.id === memberId);
             if (!ag) return null;
             const Icon = ag.icon;
+            const isLeader = currentGroup.leaderId ? currentGroup.leaderId === memberId : currentGroup.members[0] === memberId;
             return (
-              <div key={memberId} className="flex items-center gap-3 p-2 rounded-lg bg-neutral-800/50 border border-neutral-700/50">
-                <div className={cn("p-1.5 rounded-md bg-neutral-900 shadow-sm", ag.color)}>
+              <div key={memberId} className="flex items-center gap-3 p-2 rounded-lg bg-neutral-800/50 border border-neutral-700/50 group relative">
+                <div className={cn("p-1.5 rounded-md bg-neutral-900 shadow-sm flex-shrink-0", ag.color)}>
                   <Icon className="w-4 h-4" />
                 </div>
-                <span className="text-sm text-neutral-200 truncate pr-2 font-medium">{ag.name}</span>
+                <div className="flex flex-col min-w-0 pr-6">
+                  <span className="text-sm text-neutral-200 truncate font-medium flex items-center gap-1">
+                    {ag.name}
+                    {isLeader && <Crown className="w-3.5 h-3.5 text-yellow-500 flex-shrink-0" />}
+                  </span>
+                </div>
+                {!isLeader && (
+                  <button
+                    onClick={() => onSetLeader(memberId)}
+                    title="设为负责人"
+                    className="absolute right-2 p-1.5 rounded-md text-neutral-500 hover:text-yellow-500 hover:bg-neutral-800 opacity-0 group-hover:opacity-100 transition-all"
+                  >
+                    <Crown className="w-3.5 h-3.5" />
+                  </button>
+                )}
               </div>
             );
           })}
@@ -120,6 +139,16 @@ export function RightSidebar({
             </div>
           </div>
           <ChevronRight className="w-4 h-4 text-neutral-600 group-hover:text-orange-400 transition-colors" />
+        </button>
+      </div>
+      
+      <div className="mt-auto p-4 border-t border-neutral-800">
+        <button
+          onClick={onDeleteGroup}
+          className="w-full flex items-center justify-center gap-2 p-3 rounded-xl bg-red-500/10 text-red-400 hover:bg-red-500/20 hover:text-red-300 border border-red-500/20 transition-all font-medium shadow-sm"
+        >
+          <Trash2 className="w-4 h-4" />
+          删除当前群组
         </button>
       </div>
     </div>

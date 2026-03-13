@@ -33,10 +33,12 @@ interface ChatAreaProps {
   input: string;
   handleInputTextChange: (e: React.ChangeEvent<HTMLTextAreaElement>) => void;
   onAddAgent: (agentId: string) => void;
+  onSetLeader: (agentId: string) => void;
+  onDeleteGroup: () => void;
 }
 
 export function ChatArea({
-  activeSession, agents, currentGroup, activeAgentInfo, activeChannelId, setConfigAgentId, fetchGroups, isWorkspaceOpen, setIsWorkspaceOpen, setIsCronModalOpen, crons, messages, isLoading, mentionedAgentId, renderUserTextWithMentions, messagesEndRef, workspaceFiles, openFile, viewingFile, setViewingFile, mentionMenu, insertMention, proxyHandleSubmit, textareaRef, input, handleInputTextChange, onAddAgent
+  activeSession, agents, currentGroup, activeAgentInfo, activeChannelId, setConfigAgentId, fetchGroups, isWorkspaceOpen, setIsWorkspaceOpen, setIsCronModalOpen, crons, messages, isLoading, mentionedAgentId, renderUserTextWithMentions, messagesEndRef, workspaceFiles, openFile, viewingFile, setViewingFile, mentionMenu, insertMention, proxyHandleSubmit, textareaRef, input, handleInputTextChange, onAddAgent, onSetLeader, onDeleteGroup
 }: ChatAreaProps) {
   const ActiveIcon = activeAgentInfo.icon;
 
@@ -125,7 +127,7 @@ export function ChatArea({
                            <ActiveIcon className={activeSession.type === 'group' ? "w-3.5 h-3.5 text-orange-500" : cn("w-3.5 h-3.5", activeAgentInfo.color)} />
                         </div>
                         <span className="text-xs font-medium text-neutral-400">
-                           {activeSession.type === 'group' ? `${currentGroup?.name} (组内响应)` : activeAgentInfo.name}
+                           {activeSession.type === 'group' ? (m.name ? `${agents.find(a=>a.id===m.name)?.name || m.name}` : (isLoading && m === messages[messages.length - 1] ? activeAgentInfo.name : `${currentGroup?.name} (组内响应)`)) : activeAgentInfo.name}
                         </span>
                       </>
                     )}
@@ -187,6 +189,8 @@ export function ChatArea({
             workspaceFileCount={workspaceFiles.length}
             cronTaskCount={crons.filter(c => c.groupId === activeSession.id).length}
             onAddAgent={onAddAgent}
+            onSetLeader={onSetLeader}
+            onDeleteGroup={onDeleteGroup}
           />
         )}
       </div>

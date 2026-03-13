@@ -40,6 +40,7 @@ export default function Chat() {
   const [viewingFile, setViewingFile] = useState<{name: string, content: string}|null>(null);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const lastTargetAgentRef = useRef<string>('');
   
   const currentGroup = activeSession.type === 'group' ? groups.find(g => g.id === activeSession.id) : null;
   const activeChannelId = activeSession.type === 'group' ? (currentGroup?.channelId || 'default') : globalChannelId;
@@ -87,6 +88,9 @@ export default function Chat() {
       sessionType: activeSession.type,
       groupId: activeSession.type === 'group' ? activeSession.id : undefined,
       groupMembers: activeSession.type === 'group' ? currentGroup?.members : undefined,
+    },
+    onFinish: (message) => {
+      setMessages(current => current.map(m => m.id === message.id ? { ...m, name: lastTargetAgentRef.current } : m));
     }
   });
 
@@ -125,10 +129,11 @@ export default function Chat() {
 
   const targetAgentId = mentionedAgentId 
     ? mentionedAgentId 
-    : (activeSession.type === 'agent' ? activeSession.id : (currentGroup?.members[0] || 'main'));
+    : (activeSession.type === 'agent' ? activeSession.id : (currentGroup?.leaderId || currentGroup?.members[0] || 'main'));
 
   const proxyHandleSubmit = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
+    lastTargetAgentRef.current = targetAgentId;
     const targetAgent = agents.find(a => a.id === targetAgentId);
     handleSubmit(e, {
       body: {
@@ -286,6 +291,33 @@ export default function Chat() {
       }
     } else if (newAgentId) {
       alert("Agent 已在群组内或输入无效");
+    }
+  };
+
+  const handleSetLeader = async (agentId: string) => {
+    if (!currentGroup) return;
+    const updatedGroup = { ...currentGroup, leaderId: agentId };
+    try {
+      await fetch('/api/groups', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updatedGroup)
+      });
+      fetchGroups();
+    } catch (e) {
+      console.error('Failed to set group leader', e);
+    }
+  };
+
+  const handleDeleteGroup = async () => {
+    if (!currentGroup) return;
+    if (!confirm('确定要删除这个群组吗？聊天记录和相关文件将被保留，但群组本身将被解散。')) return;
+    try {
+      await fetch(`/api/groups?id=${currentGroup.id}`, { method: 'DELETE' });
+      fetchGroups();
+      setActiveSession({ type: 'agent', id: 'main' });
+    } catch (e) {
+      console.error('Failed to delete group', e);
     }
   };
 
@@ -447,6 +479,8 @@ export default function Chat() {
           input={input}
           handleInputTextChange={handleInputTextChange}
           onAddAgent={handleAddAgent}
+          onSetLeader={handleSetLeader}
+          onDeleteGroup={handleDeleteGroup}
         />
       )}
     </div>

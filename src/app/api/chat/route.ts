@@ -111,9 +111,14 @@ ${sessionType === 'group' ? `你有群组伙伴: ${groupMembers?.join(', ')}。`
     });
   }
 
+  const processedMessages = messages.map((m: any) => ({
+    ...m,
+    content: (m.role === 'assistant' && m.name) ? `[By Agent: ${m.name}]\n${m.content}` : m.content
+  }));
+
   const result = await streamText({
     model: openclaw(agentId || 'main'),
-    messages,
+    messages: processedMessages,
     system: systemInstructions,
     tools: Object.keys(agentTools).length > 0 ? agentTools : undefined,
   });
