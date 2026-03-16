@@ -3,7 +3,10 @@ export type Agent = {
   name: string;
   icon: any; 
   color: string;
-  capabilities: { read: boolean; write: boolean; exec: boolean; invite: boolean };
+  avatarEmoji?: string;
+  hasAvatarImage?: boolean;
+  isDefault?: boolean;
+  capabilities: { read: boolean; write: boolean; exec: boolean; invite: boolean; skills: boolean };
 };
 
 export type Group = {
@@ -12,6 +15,8 @@ export type Group = {
   members: string[];
   leaderId?: string; // Agent IDs
   channelId: string;
+  ownerId?: string;
+  ownerName?: string;
 };
 
 export type SessionType = {

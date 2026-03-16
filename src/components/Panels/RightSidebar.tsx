@@ -12,6 +12,7 @@ interface RightSidebarProps {
   cronTaskCount: number;
   onAddAgent: (agentId: string) => void;
   onSetLeader: (agentId: string) => void;
+  onRemoveAgent: (agentId: string) => void;
   onDeleteGroup: () => void;
 }
 
@@ -24,6 +25,7 @@ export function RightSidebar({
   cronTaskCount,
   onAddAgent,
   onSetLeader,
+  onRemoveAgent,
   onDeleteGroup
 }: RightSidebarProps) {
   const [showAddMenu, setShowAddMenu] = useState(false);
@@ -40,28 +42,38 @@ export function RightSidebar({
         <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
           {currentGroup.members.map(memberId => {
             const ag = agents.find(a => a.id === memberId);
-            if (!ag) return null;
-            const Icon = ag.icon;
             const isLeader = currentGroup.leaderId ? currentGroup.leaderId === memberId : currentGroup.members[0] === memberId;
+            const Icon = ag?.icon;
+            const displayName = ag?.name || `未知成员 (${memberId})`;
             return (
               <div key={memberId} className="flex items-center gap-3 p-2 rounded-lg bg-neutral-800/50 border border-neutral-700/50 group relative">
-                <div className={cn("p-1.5 rounded-md bg-neutral-900 shadow-sm flex-shrink-0", ag.color)}>
-                  <Icon className="w-4 h-4" />
+                <div className={cn("p-1.5 rounded-md bg-neutral-900 shadow-sm flex-shrink-0", ag?.color || 'text-neutral-400')}>
+                  {Icon ? <Icon className="w-4 h-4" /> : <Users className="w-4 h-4" />}
                 </div>
                 <div className="flex flex-col min-w-0 pr-6">
                   <span className="text-sm text-neutral-200 truncate font-medium flex items-center gap-1">
-                    {ag.name}
+                    {displayName}
                     {isLeader && <Crown className="w-3.5 h-3.5 text-yellow-500 flex-shrink-0" />}
                   </span>
+                  {!ag && <span className="text-[10px] text-neutral-500">未在当前 Agent 列表中匹配</span>}
                 </div>
                 {!isLeader && (
-                  <button
-                    onClick={() => onSetLeader(memberId)}
-                    title="设为负责人"
-                    className="absolute right-2 p-1.5 rounded-md text-neutral-500 hover:text-yellow-500 hover:bg-neutral-800 opacity-0 group-hover:opacity-100 transition-all"
-                  >
-                    <Crown className="w-3.5 h-3.5" />
-                  </button>
+                  <div className="absolute right-2 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-all">
+                    <button
+                      onClick={() => onSetLeader(memberId)}
+                      title="设为负责人"
+                      className="p-1.5 rounded-md text-neutral-500 hover:text-yellow-500 hover:bg-neutral-800"
+                    >
+                      <Crown className="w-3.5 h-3.5" />
+                    </button>
+                    <button
+                      onClick={() => onRemoveAgent(memberId)}
+                      title="从群组移除"
+                      className="p-1.5 rounded-md text-neutral-500 hover:text-rose-400 hover:bg-neutral-800"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
                 )}
               </div>
             );

@@ -4,6 +4,7 @@ import { Agent } from '../lib/types';
 
 interface SettingsViewProps {
   agents: Agent[];
+  nativeSkills?: Array<{ name: string; description?: string; source?: string }>;
   configAgentId: string;
   setConfigAgentId: (id: string | null) => void;
   configTab: 'capabilities' | 'files';
@@ -14,12 +15,13 @@ interface SettingsViewProps {
   isSavingConfig: boolean;
   loadAgentConfigFile: (agentId: string, filename: string) => void;
   saveAgentConfigFile: (agentId: string) => void;
-  toggleAgentCapability: (agentId: string, cap: 'read'|'write'|'exec'|'invite') => void;
+  toggleAgentCapability: (agentId: string, cap: 'read'|'write'|'exec'|'invite'|'skills') => void;
   isUpdatingCapabilities?: boolean;
 }
 
 export function SettingsView({
   agents,
+  nativeSkills = [],
   configAgentId,
   setConfigAgentId,
   configTab,
@@ -95,9 +97,10 @@ export function SettingsView({
                 { key: 'read', label: '文件目录读取 (Read)', desc: '允许读取所处工作区内所有的代码以及文档。关闭此功能此会使Agent无法记忆上下文工作内容。' },
                 { key: 'write', label: '文件内容写入 (Write)', desc: '允许在工作区中创建、更新、删除或覆写文件。通常需要搭配 Read 开启以正常工作。' },
                 { key: 'exec', label: '系统命令执行 (Exec)', desc: '高危: 允许执行终端底层命令 (例如 npm run build)。开启此功能时请确保底层在沙箱内，否则非常危险！' },
-                { key: 'invite', label: '拉取进群 (Invite)', desc: '允许 Agent 调用工具将其他已知 Agent 拉入群聊。默认关闭。' }
+                { key: 'invite', label: '拉取进群 (Invite)', desc: '允许 Agent 调用工具将其他已知 Agent 拉入群聊。默认关闭。' },
+                { key: 'skills', label: '原生技能通道 (Skills)', desc: '允许 Agent 使用 OpenClaw 原生 Skills（如 feishu-doc、weather 等）及其技能说明上下文。建议仅对可信 Agent 开启。' }
               ].map((cap) => {
-                const isEnabled = agent?.capabilities?.[cap.key as 'read'|'write'|'exec'|'invite'] ?? false;
+                const isEnabled = agent?.capabilities?.[cap.key as 'read'|'write'|'exec'|'invite'|'skills'] ?? false;
                 return (
                   <label key={cap.key} className="flex items-center gap-4 cursor-pointer group p-5 rounded-xl border border-neutral-800 bg-neutral-900/50 hover:bg-neutral-800 hover:border-neutral-700 transition-colors">
                     <div className={cn("w-6 h-6 rounded border flex items-center justify-center transition-colors shrink-0", isEnabled ? "bg-indigo-600 border-indigo-600 text-white" : "border-neutral-600 bg-neutral-800")}>
@@ -108,7 +111,7 @@ export function SettingsView({
                       className="hidden"
                       checked={isEnabled}
                       disabled={isUpdatingCapabilities}
-                      onChange={() => toggleAgentCapability(configAgentId, cap.key as 'read'|'write'|'exec'|'invite')}
+                      onChange={() => toggleAgentCapability(configAgentId, cap.key as 'read'|'write'|'exec'|'invite'|'skills')}
                     />
                     <div>
                       <div className="text-base font-medium text-neutral-200 group-hover:text-white transition-colors">{cap.label}</div>
@@ -117,6 +120,23 @@ export function SettingsView({
                   </label>
                 );
               })}
+            </div>
+
+            <div className="mt-8 rounded-xl border border-neutral-800 bg-neutral-900/40 p-5">
+              <div className="text-sm font-semibold text-neutral-200 mb-2">当前可用原生技能</div>
+              <p className="text-xs text-neutral-500 mb-3">此列表来自 OpenClaw 原生 skills，开关开启后该 Agent 可在对话中调用。</p>
+              {nativeSkills.length === 0 ? (
+                <div className="text-sm text-neutral-500">暂无可用技能（或 OpenClaw 未就绪）。</div>
+              ) : (
+                <div className="space-y-2 max-h-56 overflow-y-auto pr-1">
+                  {nativeSkills.map((skill) => (
+                    <div key={skill.name} className="rounded-lg border border-neutral-800/80 bg-neutral-950/70 px-3 py-2">
+                      <div className="text-sm text-neutral-200 font-medium">{skill.name}</div>
+                      <div className="text-xs text-neutral-500 mt-1">{(skill.description || '').trim() || '无描述'}</div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
         ) : (

@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "plugin:clawchating-ws": "tsx src/plugins/clawchating-ws-plugin.ts"
   },
   "dependencies": {
     "@ai-sdk/openai": "^0.0.61",
@@ -22,6 +23,7 @@
     "react-dom": "19.2.3",
     "react-markdown": "^10.1.0",
     "tailwind-merge": "^3.5.0",
+    "ws": "^8.19.0",
     "zod": "^3.25.76"
   },
   "devDependencies": {
@@ -29,9 +31,11 @@
     "@types/node": "^20.19.37",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "@types/ws": "^8.18.1",
     "eslint": "^9",
     "eslint-config-next": "16.1.6",
     "tailwindcss": "^4",
+    "tsx": "^4.21.0",
     "typescript": "^5.9.3"
   }
 }

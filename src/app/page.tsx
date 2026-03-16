@@ -1,6 +1,5 @@
 'use client';
 
-import { useChat } from '@ai-sdk/react';
 import { useState, useRef, useEffect } from 'react';
 import { Bot, Zap, Cpu, Code, PenTool, Image as ImageIcon, Terminal, Settings, Users } from 'lucide-react';
 import { Agent, Group, SessionType, CronTask } from '../lib/types';
@@ -12,7 +11,7 @@ import { CreateGroupModal } from '../components/Modals/CreateGroupModal';
 import { ChatArea } from '../components/ChatArea';
 
 const INITIAL_AGENTS: Agent[] = [
-  { id: 'main', name: '爪爪 - 本地启动中...', icon: Bot, color: 'text-indigo-500', capabilities: { read: true, write: true, exec: false, invite: false } }
+  { id: 'main', name: '爪爪 - 本地启动中...', icon: Bot, color: 'text-indigo-500', capabilities: { read: true, write: true, exec: false, invite: false, skills: true } }
 ];
 
 type AgentCapabilities = {
@@ -20,9 +19,10 @@ type AgentCapabilities = {
   write: boolean;
   exec: boolean;
   invite: boolean;
+  skills: boolean;
 };
 
-const DEFAULT_CAPABILITIES: AgentCapabilities = { read: true, write: true, exec: false, invite: false };
+const DEFAULT_CAPABILITIES: AgentCapabilities = { read: true, write: true, exec: false, invite: false, skills: true };
 
 export default function Chat() {
   const [agents, setAgents] = useState<Agent[]>(INITIAL_AGENTS);
@@ -36,6 +36,7 @@ export default function Chat() {
   const [basicConfigContent, setBasicConfigContent] = useState<string>('');
   const [isSavingConfig, setIsSavingConfig] = useState(false);
   const [savingCapabilityAgentId, setSavingCapabilityAgentId] = useState<string | null>(null);
+  const [nativeSkills, setNativeSkills] = useState<Array<{ name: string; description?: string; source?: string }>>([]);
 
   const [crons, setCrons] = useState<CronTask[]>([]);
   const [isCronModalOpen, setIsCronModalOpen] = useState(false);
@@ -49,8 +50,11 @@ export default function Chat() {
   const [workspaceFiles, setWorkspaceFiles] = useState<string[]>([]);
   const [viewingFile, setViewingFile] = useState<{name: string, content: string}|null>(null);
 
+  const [messages, setMessages] = useState<any[]>([]);
+  const [input, setInput] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const lastTargetAgentRef = useRef<string>('');
 
   const resolveGroupDefaultAgentId = () => {
     if (!currentGroup) return 'main';
@@ -124,92 +128,223 @@ export default function Chat() {
     setViewingFile(null);
   }, [activeSession.id]);
 
-  const { messages, setMessages, input, setInput, handleInputChange, handleSubmit, isLoading, append } = useChat({
-    id: activeSession.type === 'group' ? `group-channel:${activeChannelId}` : activeChannelId,
-    api: '/api/chat',
-    body: {
-      channelId: activeChannelId,
-      sessionType: activeSession.type,
-      groupId: activeSession.type === 'group' ? activeSession.id : undefined,
-      groupMembers: activeSession.type === 'group' ? currentGroup?.members : undefined,
-    },
-    onFinish: (message) => {
-      setMessages(current => current.map(m => m.id === message.id ? { ...m, name: lastTargetAgentRef.current } : m));
-    }
-  });
+  const resolveUiPeerId = () => {
+    if (activeSession.type === 'group' && currentGroup?.ownerId) return currentGroup.ownerId;
+    if (activeChannelId.startsWith('ou_')) return activeChannelId;
+    return 'ou_local_user';
+  };
 
-  const sessionIdentifier = activeSession.type === 'group' ? `group-channel:${activeChannelId}` : activeChannelId;
+  const buildSessionKeyForAgent = (agentId: string) => `agent:${agentId}:clawchating:direct:${resolveUiPeerId()}`;
+
+  const loadAgentId = activeSession.type === 'group' ? resolveGroupDefaultAgentId() : activeSession.id;
+  const sessionIdentifier = buildSessionKeyForAgent(loadAgentId);
 
   useEffect(() => {
-    fetch(`/api/messages?sessionType=${activeSession.type}&id=${sessionIdentifier}`)
+    fetch(`/api/messages?agentId=${loadAgentId}&sessionKey=${encodeURIComponent(sessionIdentifier)}`)
       .then(res => res.json())
       .then(data => {
-        setMessages(Array.isArray(data) ? data : []);
+        const loaded = Array.isArray(data)
+          ? data.map((m: any, index: number) => ({
+              id: m.id || `${Date.now()}-${index}`,
+              role: m.role,
+              content: typeof m.content === 'string' ? m.content : '',
+              name: m.name,
+            }))
+          : [];
+        setMessages(loaded);
       })
       .catch(console.error);
-  }, [sessionIdentifier, activeSession.type, setMessages]);
-
-  useEffect(() => {
-    if (messages.length === 0) return;
-    const timeoutMsg = setTimeout(() => {
-      fetch('/api/messages', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messages, sessionType: activeSession.type, id: sessionIdentifier })
-      }).catch(console.error);
-    }, 1000);
-    return () => clearTimeout(timeoutMsg);
-  }, [messages, sessionIdentifier, activeSession.type]);
+  }, [sessionIdentifier, loadAgentId]);
 
   const currentMentionedAgentId = resolveMentionedAgentId(input);
 
-  const proxyHandleSubmit = (e: React.FormEvent<HTMLFormElement>) => {
+  const proxyHandleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
+    if (isLoading) return;
 
     const latestInput = textareaRef.current?.value ?? input;
+    if (!latestInput.trim()) return;
+
     const mentionedInSubmit = resolveMentionedAgentId(latestInput);
     const targetAgentIdForSubmit = mentionedInSubmit
       ? mentionedInSubmit
       : (activeSession.type === 'agent' ? activeSession.id : resolveGroupDefaultAgentId());
 
-    lastTargetAgentRef.current = targetAgentIdForSubmit;
     const targetAgent = agents.find(a => a.id === targetAgentIdForSubmit);
 
-    handleSubmit(e, {
-      body: {
-        agentId: targetAgentIdForSubmit,
-        isMention: !!mentionedInSubmit,
-        capabilities: targetAgent?.capabilities || DEFAULT_CAPABILITIES
+    setMessages((current) => [
+      ...current,
+      {
+        id: `${Date.now()}-user`,
+        role: 'user',
+        content: latestInput,
+      },
+    ]);
+    setInput('');
+    setIsLoading(true);
+
+    try {
+      const res = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          inputText: latestInput,
+          agentId: targetAgentIdForSubmit,
+          isMention: !!mentionedInSubmit,
+          capabilities: targetAgent?.capabilities || DEFAULT_CAPABILITIES,
+          channelId: activeChannelId,
+          sessionType: activeSession.type,
+          groupId: activeSession.type === 'group' ? activeSession.id : undefined,
+          groupMembers: activeSession.type === 'group' ? currentGroup?.members : undefined,
+          senderId: resolveUiPeerId(),
+          senderName: 'Clawchating User',
+          autoMentionName: 'Clawchating User',
+        }),
+      });
+
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data?.error || 'Chat request failed');
       }
-    });
+
+      setMessages((current) => [
+        ...current,
+        {
+          id: data?.message?.id || `${Date.now()}-assistant`,
+          role: 'assistant',
+          content: data?.message?.content || '系统未返回有效回复。',
+          name: data?.message?.name || targetAgentIdForSubmit,
+        },
+      ]);
+    } catch (error) {
+      console.error(error);
+      setMessages((current) => [
+        ...current,
+        {
+          id: `${Date.now()}-error`,
+          role: 'assistant',
+          content: '请求失败，请检查 OpenClaw 网关状态或配置。',
+          name: targetAgentIdForSubmit,
+        },
+      ]);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    setInput(e.target.value);
   };
 
   useEffect(() => {
-    fetch('/api/agents')
+    if (activeSession.type === 'group' && currentGroup && !currentGroup.ownerId) {
+      const patchedGroup = { ...currentGroup, ownerId: resolveUiPeerId(), ownerName: 'Clawchating User' };
+      fetch('/api/groups', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(patchedGroup),
+      })
+        .then(() => fetchGroups())
+        .catch(console.error);
+    }
+  }, [activeSession.type, activeSession.id, currentGroup]);
+
+  const fetchAgents = async () => {
+    try {
+      const res = await fetch('/api/agents');
+      const data = await res.json();
+      if (data?.agents?.length > 0) {
+        const ICON_MAP = { Bot, Cpu, Code, Terminal, Zap, Settings, PenTool, ImageIcon };
+        const loadedAgents = data.agents.map((a: any) => ({
+          id: a.id,
+          name: a.name,
+          icon: ICON_MAP[a.iconName as keyof typeof ICON_MAP] || Bot,
+          color: a.color || 'text-indigo-500',
+          avatarEmoji: typeof a.avatarEmoji === 'string' ? a.avatarEmoji : undefined,
+          hasAvatarImage: !!a.hasAvatarImage,
+          isDefault: !!a.isDefault,
+          capabilities: {
+            read: !!a.capabilities?.read,
+            write: !!a.capabilities?.write,
+            exec: !!a.capabilities?.exec,
+            invite: !!a.capabilities?.invite,
+            skills: !!a.capabilities?.skills,
+          }
+        }));
+        setAgents(loadedAgents);
+        if (activeSession.type === 'agent' && !loadedAgents.find((a: any) => a.id === activeSession.id)) {
+          setActiveSession({ type: 'agent', id: loadedAgents[0].id });
+        }
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  useEffect(() => {
+    fetchAgents();
+
+    fetch('/api/skills?eligible=true')
       .then(res => res.json())
       .then(data => {
-        if (data?.agents?.length > 0) {
-          const ICON_MAP = { Bot, Cpu, Code, Terminal, Zap, Settings, PenTool, ImageIcon };
-          const loadedAgents = data.agents.map((a: any) => ({
-            id: a.id,
-            name: a.name,
-            icon: ICON_MAP[a.iconName as keyof typeof ICON_MAP] || Bot,
-            color: a.color || 'text-indigo-500',
-            capabilities: {
-              read: !!a.capabilities?.read,
-              write: !!a.capabilities?.write,
-              exec: !!a.capabilities?.exec,
-              invite: !!a.capabilities?.invite,
-            }
-          }));
-          setAgents(loadedAgents);
-          if (activeSession.type === 'agent' && !loadedAgents.find((a: any) => a.id === activeSession.id)) {
-            setActiveSession({ type: 'agent', id: loadedAgents[0].id });
-          }
+        if (Array.isArray(data?.skills)) {
+          setNativeSkills(
+            data.skills.map((s: any) => ({
+              name: String(s.name || ''),
+              description: typeof s.description === 'string' ? s.description : '',
+              source: typeof s.source === 'string' ? s.source : '',
+            })).filter((s: any) => s.name)
+          );
         }
       })
       .catch(console.error);
   }, []);
+
+  const createAgent = async (payload: {
+    agentId: string;
+    name?: string;
+    workspace?: string;
+    model?: string;
+    bindings?: string[];
+    setDefault?: boolean;
+  }) => {
+    const res = await fetch('/api/agents', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data?.error || '创建 Agent 失败');
+    }
+
+    await fetchAgents();
+    setActiveSession({ type: 'agent', id: payload.agentId });
+  };
+
+  const deleteAgent = async (agentId: string) => {
+    const res = await fetch(`/api/agents?agentId=${encodeURIComponent(agentId)}`, {
+      method: 'DELETE',
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data?.error || '删除 Agent 失败');
+    }
+    await fetchAgents();
+  };
+
+  const setDefaultAgent = async (agentId: string) => {
+    const res = await fetch('/api/agents', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ agentId }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data?.error || '设置默认 Agent 失败');
+    }
+    await fetchAgents();
+  };
 
   const fetchGroups = async () => {
     try {
@@ -302,7 +437,13 @@ export default function Chat() {
   };
 
   const handleCreateGroup = async (name: string, members: string[], channelId: string) => {
-    const newGroupInfo = { name, members, channelId };
+    const newGroupInfo = {
+      name,
+      members,
+      channelId,
+      ownerId: resolveUiPeerId(),
+      ownerName: 'Clawchating User',
+    };
     try {
       const res = await fetch('/api/groups', {
         method: 'POST',
@@ -351,6 +492,37 @@ export default function Chat() {
       fetchGroups();
     } catch (e) {
       console.error('Failed to set group leader', e);
+    }
+  };
+
+  const handleRemoveAgent = async (memberId: string) => {
+    if (!currentGroup) return;
+    if (!currentGroup.members.includes(memberId)) return;
+    if (currentGroup.members.length <= 1) {
+      alert('群组至少需要保留 1 个成员。');
+      return;
+    }
+
+    const nextMembers = currentGroup.members.filter((id) => id !== memberId);
+    const nextLeaderId = currentGroup.leaderId === memberId
+      ? (nextMembers[0] || undefined)
+      : currentGroup.leaderId;
+
+    const updatedGroup = {
+      ...currentGroup,
+      members: nextMembers,
+      leaderId: nextLeaderId,
+    };
+
+    try {
+      await fetch('/api/groups', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updatedGroup),
+      });
+      fetchGroups();
+    } catch (e) {
+      console.error('Failed to remove agent from group', e);
     }
   };
 
@@ -431,7 +603,7 @@ export default function Chat() {
     ? (agents.find(a => a.id === activeSession.id) || agents[0])
     : { name: currentGroup?.name || '未知群聊', id: currentGroup?.id, icon: Users, color: 'text-orange-500' };
 
-  const toggleAgentCapability = async (agentId: string, cap: 'read' | 'write' | 'exec' | 'invite') => {
+  const toggleAgentCapability = async (agentId: string, cap: 'read' | 'write' | 'exec' | 'invite' | 'skills') => {
     if (savingCapabilityAgentId === agentId) return;
 
     const currentAgent = agents.find(a => a.id === agentId);
@@ -501,11 +673,15 @@ export default function Chat() {
         setGlobalChannelId={setGlobalChannelId}
         setIsCreatingGroup={setIsCreatingGroup}
         setConfigAgentId={setConfigAgentId}
+        createAgent={createAgent}
+        deleteAgent={deleteAgent}
+        setDefaultAgent={setDefaultAgent}
       />
 
       {configAgentId ? (
         <SettingsView 
           agents={agents}
+          nativeSkills={nativeSkills}
           configAgentId={configAgentId}
           setConfigAgentId={setConfigAgentId}
           configTab={configTab}
@@ -549,6 +725,7 @@ export default function Chat() {
           handleInputTextChange={handleInputTextChange}
           onAddAgent={handleAddAgent}
           onSetLeader={handleSetLeader}
+          onRemoveAgent={handleRemoveAgent}
           onDeleteGroup={handleDeleteGroup}
         />
       )}

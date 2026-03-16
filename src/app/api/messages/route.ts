@@ -1,43 +1,47 @@
-import * as fs from 'fs/promises';
-import * as path from 'path';
+import { appendSessionMessage, ensureAgentSession, loadSessionMessages, resolvePeerId } from '@/lib/session-runtime';
 
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url);
-  const sessionType = searchParams.get('sessionType');
-  const sessionOrChannelId = searchParams.get('id');
+  const agentId = searchParams.get('agentId');
+  const sessionKey = searchParams.get('sessionKey');
 
-  const workspaceFolderName = sessionType === 'group' ? sessionOrChannelId : sessionOrChannelId || 'default-workspace';
-  const filePath = path.join(process.cwd(), 'workspaces', workspaceFolderName || 'default-workspace', 'messages.json');
-
-  try {
-    const data = await fs.readFile(filePath, 'utf-8');
-    return new Response(data, {
+  if (!agentId || !sessionKey) {
+    return new Response(JSON.stringify({ error: 'agentId and sessionKey are required' }), {
+      status: 400,
       headers: { 'Content-Type': 'application/json' },
     });
-  } catch (error: any) {
-    if (error.code === 'ENOENT') {
-      return new Response('[]', {
-        headers: { 'Content-Type': 'application/json' },
-      });
-    }
-    return new Response(JSON.stringify({ error: error.message }), { status: 500 });
   }
+
+  const messages = await loadSessionMessages({ agentId, sessionKey, limit: 80 });
+  return new Response(JSON.stringify(messages), {
+    headers: { 'Content-Type': 'application/json' },
+  });
 }
 
 export async function POST(req: Request) {
-  const { messages, sessionType, id } = await req.json();
+  const { agentId, sessionKey, role, content, senderId, channelId, senderName } = await req.json();
 
-  const workspaceFolderName = sessionType === 'group' ? id : id || 'default-workspace';
-  const dirPath = path.join(process.cwd(), 'workspaces', workspaceFolderName || 'default-workspace');
-  const filePath = path.join(dirPath, 'messages.json');
-
-  try {
-    await fs.mkdir(dirPath, { recursive: true });
-    await fs.writeFile(filePath, JSON.stringify(messages, null, 2), 'utf-8');
-    return new Response(JSON.stringify({ success: true }), {
+  if (!agentId || !sessionKey || !role || typeof content !== 'string') {
+    return new Response(JSON.stringify({ error: 'agentId, sessionKey, role and content are required' }), {
+      status: 400,
       headers: { 'Content-Type': 'application/json' },
     });
-  } catch (error: any) {
-    return new Response(JSON.stringify({ error: error.message }), { status: 500 });
   }
+
+  const session = await ensureAgentSession({
+    agentId,
+    peerId: resolvePeerId(senderId, channelId),
+    senderLabel: typeof senderName === 'string' && senderName.trim() ? senderName : 'Clawchating User',
+  });
+
+  await appendSessionMessage({
+    agentId,
+    sessionId: session.sessionId,
+    role: role === 'assistant' ? 'assistant' : 'user',
+    content,
+  });
+
+  return new Response(JSON.stringify({ success: true }), {
+    headers: { 'Content-Type': 'application/json' },
+  });
 }

@@ -1,6 +1,9 @@
-import { Bot, Hash, Users, Plus, Settings } from 'lucide-react';
+import { Bot, Hash, Users, Plus, Settings, Trash2, Star } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { Agent, Group, SessionType } from '../lib/types';
+import { useState } from 'react';
+import { CreateAgentModal } from './Modals/CreateAgentModal';
+import { DeleteAgentModal } from './Modals/DeleteAgentModal';
 
 interface SidebarProps {
   agents: Agent[];
@@ -11,6 +14,16 @@ interface SidebarProps {
   setGlobalChannelId: (id: string) => void;
   setIsCreatingGroup: (val: boolean) => void;
   setConfigAgentId: (id: string | null) => void;
+  createAgent: (payload: {
+    agentId: string;
+    name?: string;
+    workspace?: string;
+    model?: string;
+    bindings?: string[];
+    setDefault?: boolean;
+  }) => Promise<void>;
+  deleteAgent: (agentId: string) => Promise<void>;
+  setDefaultAgent: (agentId: string) => Promise<void>;
 }
 
 export function Sidebar({
@@ -21,10 +34,41 @@ export function Sidebar({
   globalChannelId,
   setGlobalChannelId,
   setIsCreatingGroup,
-  setConfigAgentId
+  setConfigAgentId,
+  createAgent,
+  deleteAgent,
+  setDefaultAgent,
 }: SidebarProps) {
+  const [isCreatingAgent, setIsCreatingAgent] = useState(false);
+  const [deletingAgent, setDeletingAgent] = useState<Agent | null>(null);
+  const [isDeletingAgent, setIsDeletingAgent] = useState(false);
+  const [settingDefaultAgentId, setSettingDefaultAgentId] = useState<string | null>(null);
+
   return (
     <div className="w-64 bg-neutral-950 border-r border-neutral-800 flex flex-col flex-shrink-0 relative z-20">
+      <CreateAgentModal
+        isOpen={isCreatingAgent}
+        onClose={() => setIsCreatingAgent(false)}
+        onCreate={createAgent}
+      />
+      <DeleteAgentModal
+        isOpen={!!deletingAgent}
+        agentId={deletingAgent?.id || ''}
+        agentName={deletingAgent?.name || ''}
+        isDeleting={isDeletingAgent}
+        onClose={() => setDeletingAgent(null)}
+        onConfirm={async () => {
+          if (!deletingAgent) return;
+          setIsDeletingAgent(true);
+          try {
+            await deleteAgent(deletingAgent.id);
+            setDeletingAgent(null);
+          } finally {
+            setIsDeletingAgent(false);
+          }
+        }}
+      />
+
       <div className="p-4 border-b border-neutral-800 flex items-center gap-3 shrink-0">
         <div className="p-2 bg-indigo-500/20 rounded-xl border border-indigo-500/30">
           <Bot className="w-6 h-6 text-indigo-400" />
@@ -93,37 +137,91 @@ export function Sidebar({
             <span>独立助理 (Agents)</span>
             <span className="bg-neutral-800 text-neutral-400 px-1.5 py-0.5 rounded text-[10px]">{agents.length}</span>
           </div>
-          {agents.map((agent) => (
-            <div
-              key={agent.id} 
-              className={cn(
-                "w-full flex items-center justify-between px-3 py-1 rounded-lg transition-all duration-200 group outline-none",
-                (activeSession.type === 'agent' && activeSession.id === agent.id)
-                  ? "bg-neutral-800 text-white font-medium shadow-sm border border-neutral-700/50" 
-                  : "text-neutral-400 hover:bg-neutral-800/50 hover:text-neutral-200 border border-transparent"
-              )}
-            >
-              <button 
-                className="flex-1 flex items-center gap-3 py-1.5 text-sm text-left truncate"
-                onClick={() => setActiveSession({ type: 'agent', id: agent.id })}
-              >
-                <agent.icon className={cn("w-4 h-4 shrink-0", agent.color)} />
-                <span className="truncate">{agent.name}</span>
-              </button>
-              <div className="flex items-center gap-2 shrink-0">
-                <button 
-                  onClick={(e) => { e.stopPropagation(); setConfigAgentId(agent.id); }}
-                  className="p-1 hover:bg-neutral-700 rounded text-neutral-500 hover:text-indigo-400 transition-colors opacity-0 group-hover:opacity-100"
-                  title="配置能力"
-                >
-                  <Settings className="w-3.5 h-3.5" />
-                </button>
-                {(activeSession.type === 'agent' && activeSession.id === agent.id) && (
-                  <div className="w-1.5 h-1.5 rounded-full bg-indigo-500 animate-pulse"></div>
+          <div className="max-h-[290px] overflow-y-auto pr-1 space-y-1">
+            {agents.map((agent) => (
+              <div
+                key={agent.id} 
+                className={cn(
+                  "w-full flex items-center justify-between px-3 py-1 rounded-lg transition-all duration-200 group outline-none",
+                  (activeSession.type === 'agent' && activeSession.id === agent.id)
+                    ? "bg-neutral-800 text-white font-medium shadow-sm border border-neutral-700/50" 
+                    : "text-neutral-400 hover:bg-neutral-800/50 hover:text-neutral-200 border border-transparent"
                 )}
+              >
+                <button 
+                  className="flex-1 flex items-center gap-3 py-1.5 text-sm text-left truncate"
+                  onClick={() => setActiveSession({ type: 'agent', id: agent.id })}
+                >
+                  {agent.hasAvatarImage ? (
+                    <img
+                      src={`/api/agents/avatar?agentId=${encodeURIComponent(agent.id)}`}
+                      alt={agent.name}
+                      className="w-5 h-5 rounded-full shrink-0 object-cover border border-neutral-700"
+                    />
+                  ) : agent.avatarEmoji ? (
+                    <span className="w-5 h-5 shrink-0 text-base leading-5 text-center">{agent.avatarEmoji}</span>
+                  ) : (
+                    <agent.icon className={cn("w-4 h-4 shrink-0", agent.color)} />
+                  )}
+                  <span className="truncate">{agent.name}</span>
+                  {agent.isDefault ? (
+                    <span className="ml-1 rounded bg-amber-500/20 text-amber-300 border border-amber-500/40 px-1.5 py-0.5 text-[10px] shrink-0">
+                      默认
+                    </span>
+                  ) : null}
+                </button>
+                <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    onClick={async (e) => {
+                      e.stopPropagation();
+                      if (agent.isDefault || settingDefaultAgentId === agent.id) return;
+                      setSettingDefaultAgentId(agent.id);
+                      try {
+                        await setDefaultAgent(agent.id);
+                      } finally {
+                        setSettingDefaultAgentId(null);
+                      }
+                    }}
+                    className={cn(
+                      'p-1 rounded transition-colors opacity-0 group-hover:opacity-100',
+                      agent.isDefault
+                        ? 'text-amber-400 opacity-100 cursor-default'
+                        : 'text-neutral-500 hover:text-amber-300 hover:bg-neutral-700'
+                    )}
+                    title={agent.isDefault ? '当前默认助手' : '设为默认助手'}
+                  >
+                    <Star className={cn('w-3.5 h-3.5', agent.isDefault ? 'fill-current' : '')} />
+                  </button>
+                  <button
+                    onClick={(e) => { e.stopPropagation(); setDeletingAgent(agent); }}
+                    className="p-1 hover:bg-neutral-700 rounded text-neutral-500 hover:text-rose-400 transition-colors opacity-0 group-hover:opacity-100"
+                    title="删除 Agent"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                  <button 
+                    onClick={(e) => { e.stopPropagation(); setConfigAgentId(agent.id); }}
+                    className="p-1 hover:bg-neutral-700 rounded text-neutral-500 hover:text-indigo-400 transition-colors opacity-0 group-hover:opacity-100"
+                    title="配置能力"
+                  >
+                    <Settings className="w-3.5 h-3.5" />
+                  </button>
+                  {(activeSession.type === 'agent' && activeSession.id === agent.id) && (
+                    <div className="w-1.5 h-1.5 rounded-full bg-indigo-500 animate-pulse"></div>
+                  )}
+                </div>
               </div>
-            </div>
-          ))}
+            ))}
+          </div>
+
+          <button
+            onClick={() => setIsCreatingAgent(true)}
+            className="mt-2 w-full border border-dashed border-neutral-700 hover:border-indigo-500/60 rounded-lg px-3 py-2 text-sm text-neutral-400 hover:text-indigo-300 transition-colors flex items-center justify-center gap-2"
+            title="新增 Agent"
+          >
+            <Plus className="w-4 h-4" />
+            新增 Agent
+          </button>
         </div>
       </div>
     </div>

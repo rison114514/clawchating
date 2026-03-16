@@ -34,11 +34,12 @@ interface ChatAreaProps {
   handleInputTextChange: (e: React.ChangeEvent<HTMLTextAreaElement>) => void;
   onAddAgent: (agentId: string) => void;
   onSetLeader: (agentId: string) => void;
+  onRemoveAgent: (agentId: string) => void;
   onDeleteGroup: () => void;
 }
 
 export function ChatArea({
-  activeSession, agents, currentGroup, activeAgentInfo, activeChannelId, setConfigAgentId, fetchGroups, isWorkspaceOpen, setIsWorkspaceOpen, setIsCronModalOpen, crons, messages, isLoading, mentionedAgentId, renderUserTextWithMentions, messagesEndRef, workspaceFiles, openFile, viewingFile, setViewingFile, mentionMenu, insertMention, proxyHandleSubmit, textareaRef, input, handleInputTextChange, onAddAgent, onSetLeader, onDeleteGroup
+  activeSession, agents, currentGroup, activeAgentInfo, activeChannelId, setConfigAgentId, fetchGroups, isWorkspaceOpen, setIsWorkspaceOpen, setIsCronModalOpen, crons, messages, isLoading, mentionedAgentId, renderUserTextWithMentions, messagesEndRef, workspaceFiles, openFile, viewingFile, setViewingFile, mentionMenu, insertMention, proxyHandleSubmit, textareaRef, input, handleInputTextChange, onAddAgent, onSetLeader, onRemoveAgent, onDeleteGroup
 }: ChatAreaProps) {
   const ActiveIcon = activeAgentInfo.icon;
 
@@ -71,22 +72,27 @@ export function ChatArea({
         
         <div className="flex items-center gap-4">
            {activeSession.type === 'group' && currentGroup && (
-             <div className="flex items-center -space-x-2 overflow-hidden mr-2">
-                {currentGroup.members.map(memberId => {
-                  const ag = agents.find(a => a.id === memberId);
-                  if (!ag) return null;
-                  const Icon = ag.icon;
-                  return (
-                    <button 
-                      key={memberId} 
-                      title={`配置 ${ag.name} 能力`} 
-                      onClick={() => setConfigAgentId(memberId)}
-                      className="inline-block rounded-full bg-neutral-800 border-2 border-neutral-900 p-1 hover:z-10 hover:border-indigo-500 transition-colors"
-                    >
-                      <Icon className={cn("w-3 h-3", ag.color)} />
-                    </button>
-                  );
-                })}
+             <div className="flex items-center gap-2 mr-2 min-w-0">
+               <div className="text-[11px] text-neutral-500 shrink-0">{currentGroup.members.length} 成员</div>
+               <div className="flex items-center gap-1 overflow-x-auto max-w-[260px] pr-1">
+                  {currentGroup.members.map(memberId => {
+                    const ag = agents.find(a => a.id === memberId);
+                    return (
+                      <button 
+                        key={memberId} 
+                        title={ag ? `配置 ${ag.name} 能力` : `未知成员 ${memberId}`} 
+                        onClick={() => setConfigAgentId(memberId)}
+                        className="inline-flex rounded-full bg-neutral-800 border border-neutral-700 p-1.5 hover:border-indigo-500 transition-colors shrink-0"
+                      >
+                        {ag ? (
+                          <ag.icon className={cn("w-3 h-3", ag.color)} />
+                        ) : (
+                          <User className="w-3 h-3 text-neutral-400" />
+                        )}
+                      </button>
+                    );
+                  })}
+               </div>
              </div>
            )}
         </div>
@@ -190,6 +196,7 @@ export function ChatArea({
             cronTaskCount={crons.filter(c => c.groupId === activeSession.id).length}
             onAddAgent={onAddAgent}
             onSetLeader={onSetLeader}
+            onRemoveAgent={onRemoveAgent}
             onDeleteGroup={onDeleteGroup}
           />
         )}
