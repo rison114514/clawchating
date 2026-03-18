@@ -1,7 +1,23 @@
-import { appendSessionMessage, ensureAgentSession, loadSessionMessages, resolvePeerId } from '@/lib/session-runtime';
+import {
+  appendSessionMessage,
+  ensureAgentSession,
+  loadGroupTimelineMessages,
+  loadSessionMessages,
+  resolvePeerId,
+} from '@/lib/session-runtime';
 
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url);
+  const groupId = (searchParams.get('groupId') || '').trim();
+  const channelId = (searchParams.get('channelId') || '').trim() || 'default';
+
+  if (groupId) {
+    const messages = await loadGroupTimelineMessages({ groupId, channelId, limit: 200 });
+    return new Response(JSON.stringify(messages), {
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
   const agentId = searchParams.get('agentId');
   const sessionKey = searchParams.get('sessionKey');
 

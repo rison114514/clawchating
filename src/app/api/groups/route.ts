@@ -1,43 +1,10 @@
 import { NextResponse } from 'next/server';
 import fs from 'fs/promises';
 import path from 'path';
-import { initializeGroupSessions } from '@/lib/session-runtime';
+import os from 'os';
+import { appendSessionMessage, initializeGroupSessions } from '@/lib/session-runtime';
 
 const groupsPath = path.join(process.cwd(), 'workspaces', 'groups.json');
-const defaultGroupSkillsGuide = `# Clawchating 专属技能使用方法
-
-本文件用于记录本群组内可复用的 Clawchating 协作技能。
-
-## 推荐使用方式
-
-1. 先明确任务目标与产出格式。
-2. 将任务拆分为可执行步骤，并标注负责人。
-3. 在群聊中保持上下文连续，避免重复描述背景。
-4. 对重要结论给出可验证依据（代码位置、日志、命令结果）。
-
-## 常用技能模板
-
-### 1) 代码审查技能
-- 目标：发现 bug、风险与回归点。
-- 输入：变更文件列表、关键业务路径。
-- 输出：按严重级别排序的问题清单与修复建议。
-
-### 2) 问题排查技能
-- 目标：快速定位故障根因。
-- 输入：报错信息、复现步骤、最近变更。
-- 输出：根因判断、修复方案、验证结果。
-
-### 3) 需求落地技能
-- 目标：将需求转成可发布改动。
-- 输入：需求描述、约束条件、验收标准。
-- 输出：实现方案、代码变更、测试结论。
-
-## 维护约定
-
-- 新增技能时，补充“适用场景 / 输入 / 输出 / 注意事项”。
-- 技能描述保持简洁，优先可执行动作。
-- 定期清理过时技能，保证团队可直接复用。
-`;
 
 async function getGroups() {
   try {
@@ -53,13 +20,168 @@ async function saveGroups(groups: any) {
   await fs.writeFile(groupsPath, JSON.stringify(groups, null, 2));
 }
 
-async function ensureGroupSkillsGuide(groupId: string) {
-  const workspaceDir = path.join(process.cwd(), 'workspaces', groupId);
-  const skillsDir = path.join(workspaceDir, 'skills');
-  const guideFile = path.join(skillsDir, 'README.md');
+type OpenClawConfig = {
+  agents?: {
+    list?: Array<{ id?: string; workspace?: string }>;
+  };
+};
 
-  await fs.mkdir(skillsDir, { recursive: true });
-  await fs.writeFile(guideFile, defaultGroupSkillsGuide, 'utf-8');
+async function readOpenClawConfig() {
+  const configPath = path.join(os.homedir(), '.openclaw', 'openclaw.json');
+  try {
+    const raw = await fs.readFile(configPath, 'utf-8');
+    return JSON.parse(raw) as OpenClawConfig;
+  } catch {
+    return {} as OpenClawConfig;
+  }
+}
+
+async function getAgentWorkspaceMap() {
+  const config = await readOpenClawConfig();
+  const agents = Array.isArray(config.agents?.list) ? config.agents?.list : [];
+  const workspaceByAgentId = new Map<string, string>();
+  for (const agent of agents) {
+    const id = String(agent?.id || '').trim();
+    const workspace = String(agent?.workspace || '').trim();
+    if (id && workspace) workspaceByAgentId.set(id, workspace);
+  }
+  return workspaceByAgentId;
+}
+
+async function ensureGroupWorkspaceMounts(groupId: string, memberAgentIds: string[]) {
+  if (!groupId || !Array.isArray(memberAgentIds) || memberAgentIds.length === 0) return;
+
+  const uniqueMembers = Array.from(new Set(memberAgentIds.map((id) => String(id || '').trim()).filter(Boolean)));
+  if (uniqueMembers.length === 0) return;
+
+  const workspaceByAgentId = await getAgentWorkspaceMap();
+
+  const sharedWorkspaceDir = path.resolve(path.join(process.cwd(), 'workspaces', groupId));
+  await fs.mkdir(sharedWorkspaceDir, { recursive: true });
+
+  for (const agentId of uniqueMembers) {
+    const agentWorkspaceDir = workspaceByAgentId.get(agentId);
+    if (!agentWorkspaceDir) continue;
+
+    const mountsDir = path.resolve(path.join(agentWorkspaceDir, 'group_mounts'));
+    const mountPath = path.resolve(path.join(mountsDir, groupId));
+
+    await fs.mkdir(mountsDir, { recursive: true });
+
+    try {
+      const stat = await fs.lstat(mountPath);
+      if (stat.isSymbolicLink()) {
+        const linkTarget = await fs.readlink(mountPath);
+        const resolvedLinkTarget = path.resolve(path.dirname(mountPath), linkTarget);
+        if (resolvedLinkTarget === sharedWorkspaceDir) {
+          continue;
+        }
+        await fs.unlink(mountPath);
+      } else {
+        // Preserve existing non-link files/dirs to avoid destructive side effects.
+        continue;
+      }
+    } catch (error: any) {
+      if (error?.code !== 'ENOENT') {
+        continue;
+      }
+    }
+
+    await fs.symlink(sharedWorkspaceDir, mountPath, 'dir');
+  }
+}
+
+async function writeGroupContextForMembers(groupId: string, channelId: string, memberAgentIds: string[]) {
+  if (!groupId) return;
+
+  const sharedWorkspaceDir = path.resolve(path.join(process.cwd(), 'workspaces', groupId));
+  await fs.mkdir(sharedWorkspaceDir, { recursive: true });
+
+  const contextPath = path.join(sharedWorkspaceDir, 'GROUP_CONTEXT.md');
+  const communicationLines = [
+    `- communicationProtocol: 在本群组中，成员之间只要在回复里使用 @agentId 或 @显示名，就会由系统自动路由到对应成员。`,
+    `- communicationConstraint: 不需要额外消息发送工具；不要声称“无法发送消息”或“@失败”。`,
+  ];
+
+  try {
+    const stat = await fs.stat(contextPath);
+    if (stat.isFile()) {
+      const existing = await fs.readFile(contextPath, 'utf-8');
+      const hasProtocol = existing.includes('communicationProtocol:');
+      const hasConstraint = existing.includes('communicationConstraint:');
+      if (hasProtocol && hasConstraint) return;
+
+      const next = [
+        existing.trimEnd(),
+        ...communicationLines.filter((line) => {
+          if (line.includes('communicationProtocol:') && hasProtocol) return false;
+          if (line.includes('communicationConstraint:') && hasConstraint) return false;
+          return true;
+        }),
+        '',
+      ].join('\n');
+      await fs.writeFile(contextPath, next, 'utf-8');
+      return;
+    }
+  } catch {
+    // File does not exist, proceed
+  }
+
+  const sectionBody = [
+    `# Group ${groupId}`,
+    `- groupId: ${groupId}`,
+    `- channelId: ${channelId}`,
+    `- location: This file is located in the shared workspace root.`,
+    `- mountPoint: In your agent workspace, this directory is mounted at \`./group_mounts/${groupId}\``,
+    ...communicationLines,
+    `- usageConstraint: 仅群组上下文使用，不要在非本群组任务中使用该共享目录。`,
+    `- updatedAt: ${new Date().toISOString()}`,
+  ].join('\n');
+
+  await fs.writeFile(contextPath, sectionBody, 'utf-8');
+}
+
+async function appendJoinInitializationPrompt(
+  groupId: string,
+  channelId: string,
+  initializedMembers: Array<{ agentId: string; sessionId: string; workspaceDir: string }>
+) {
+  if (!groupId || initializedMembers.length === 0) return;
+
+  const sharedWorkspaceDir = path.resolve(path.join(process.cwd(), 'workspaces', groupId));
+
+  for (const member of initializedMembers) {
+    const mountPath = path.resolve(path.join(member.workspaceDir, 'group_mounts', groupId));
+    const contextFilePath = path.join(mountPath, 'GROUP_CONTEXT.md');
+    const initMessage = [
+      `@${member.agentId} [Join Initialization] 你已加入群组 ${groupId}。`,
+      `群组上下文文件位于：${contextFilePath}`,
+      `请立即使用 \`read_file\` 工具读取该文件内容，以获取群组背景信息。`,
+      `注意：必须真实调用工具读取文件，禁止编造内容。`,
+      `频道ID: ${channelId}`,
+    ].join('\n');
+
+    await appendSessionMessage({
+      agentId: member.agentId,
+      sessionId: member.sessionId,
+      role: 'user',
+      content: initMessage,
+      name: 'group-init',
+    });
+  }
+}
+
+function normalizeGroupPayload(group: any) {
+  const members = Array.isArray(group?.members)
+    ? Array.from(new Set(group.members.map((m: unknown) => String(m).trim()).filter(Boolean)))
+    : [];
+  const leaderId = typeof group?.leaderId === 'string' ? group.leaderId.trim() : '';
+
+  return {
+    ...group,
+    members,
+    leaderId: members.includes(leaderId) ? leaderId : (members[0] || undefined),
+  };
 }
 
 export async function GET() {
@@ -67,32 +189,37 @@ export async function GET() {
 }
 
 export async function POST(req: Request) {
-  const newGroup = await req.json();
+  const newGroup = normalizeGroupPayload(await req.json());
   const groups = await getGroups();
   
   if (!newGroup.id) {
     newGroup.id = `group-${Date.now()}`;
   }
+  if (!/^[a-zA-Z0-9_:-]+$/.test(newGroup.id)) {
+    return NextResponse.json({ error: 'Invalid group id format' }, { status: 400 });
+  }
   
   groups.push(newGroup);
   await saveGroups(groups);
-  await ensureGroupSkillsGuide(newGroup.id);
+  await ensureGroupWorkspaceMounts(newGroup.id, Array.isArray(newGroup.members) ? newGroup.members : []);
 
   if (Array.isArray(newGroup.members) && newGroup.members.length > 0) {
-    await initializeGroupSessions({
+    const initializedMembers = await initializeGroupSessions({
       groupId: newGroup.id,
       channelId: newGroup.channelId || 'default',
       ownerUserId: newGroup.ownerId,
       ownerName: newGroup.ownerName,
       memberAgentIds: newGroup.members,
     });
+    await writeGroupContextForMembers(newGroup.id, newGroup.channelId || 'default', newGroup.members);
+    await appendJoinInitializationPrompt(newGroup.id, newGroup.channelId || 'default', initializedMembers);
   }
 
   return NextResponse.json({ success: true, group: newGroup });
 }
 
 export async function PUT(req: Request) {
-  const updatedGroup = await req.json();
+  const updatedGroup = normalizeGroupPayload(await req.json());
   let groups = await getGroups();
   const previousGroup = groups.find((g: any) => g.id === updatedGroup.id);
 
@@ -103,14 +230,18 @@ export async function PUT(req: Request) {
   const nextMembers: string[] = Array.isArray(updatedGroup?.members) ? updatedGroup.members : [];
   const newlyAddedMembers = nextMembers.filter((member) => !prevMembers.includes(member));
 
+  await ensureGroupWorkspaceMounts(updatedGroup.id, newlyAddedMembers);
+
   if (newlyAddedMembers.length > 0) {
-    await initializeGroupSessions({
+    const initializedMembers = await initializeGroupSessions({
       groupId: updatedGroup.id,
       channelId: updatedGroup.channelId || 'default',
       ownerUserId: updatedGroup.ownerId,
       ownerName: updatedGroup.ownerName,
       memberAgentIds: newlyAddedMembers,
     });
+    await writeGroupContextForMembers(updatedGroup.id, updatedGroup.channelId || 'default', newlyAddedMembers);
+    await appendJoinInitializationPrompt(updatedGroup.id, updatedGroup.channelId || 'default', initializedMembers);
   }
 
   return NextResponse.json({ success: true, group: updatedGroup });

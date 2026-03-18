@@ -154,4 +154,66 @@
 4. 验证创建 Agent 时不勾选“设为默认”不会覆盖原默认 Agent。
 5. 验证删除群成员后 leader 回退逻辑与成员卡片显示一致。
 6. 验证头像文件路径越界请求被拒绝。
-   EOF
+
+## 回归清单执行结果（2026-03-17）
+
+1. 群组 skills 初始化：已加固。
+  - 结果：新群组创建时会自动确保 skills/README.md 存在。
+  - 优化：README 改为“仅首次生成”，避免覆盖后续人工维护内容。
+
+2. 设置页权限持久化：已确认。
+  - 结果：skills/read/write/exec/invite 通过 /api/agents 持久化到 openclaw 配置。
+  - 验证：刷新后由 /api/agents 重新拉取能力，状态可回显。
+
+3. shared/agent 作用域隔离：已加固。
+  - 结果：工具调用按 scope 选择目录。
+  - 优化：路径解析持续使用工作区前缀校验，禁止路径逃逸。
+
+4. 创建 Agent 默认设置：已修复并加固。
+  - 结果：仅当 setDefault=true 时才更新默认 Agent。
+  - 优化：未勾选“设为默认”时不再触碰已有默认配置，避免误覆盖。
+
+5. 删除群成员后 leader 回退与卡片一致性：已加固。
+  - 结果：移除 leader 时自动回退到首个剩余成员。
+  - 优化：群组 POST/PUT 统一做成员去重与 leader 合法化，避免脏数据导致展示不一致。
+
+6. 头像路径越界防护：已加固。
+  - 结果：保留基于路径前缀的工作区边界校验。
+  - 优化：新增 realpath 校验，阻断符号链接跳出工作区的读取风险。
+
+## 本轮新增代码加固点
+
+- src/app/api/groups/route.ts
+  - skills README 改为仅首次创建。
+  - 新增群组 payload 规范化（members 去重、leader 合法化）。
+  - 新增 groupId 格式校验。
+
+- src/app/api/agents/route.ts
+  - 创建 Agent 时仅在 setDefault=true 才写默认配置。
+
+- src/app/api/agents/avatar/route.ts
+  - 新增 realpath 边界校验，防止 symlink 逃逸。
+
+## 记忆系统优化（2026-03-17）
+
+- 已新增一键脚本：scripts/enable-qmd.sh
+  - 作用：
+    - 启用 memorySearch 混合检索优化（vector + BM25 + MMR + 时间衰减）。
+    - 自动为每个 Agent 工作区创建 memory/ 目录。
+    - 尝试启用 OpenClaw QMD 后端（memory.backend=qmd + plugins.slots.memory=qmd）。
+    - 若 QMD 不可用或校验失败，自动回退到 memory-core，避免配置损坏。
+    - 自动触发 memory index 并输出 memory status 摘要。
+
+- 已新增 npm 快捷命令：
+  - npm run qmd:enable
+  - npm run qmd:enable:restart
+
+- 本机实测结果：
+  - QMD 尝试启用失败（原因：plugins.slots.memory 未找到 qmd 插件，且本机 PATH 未发现 qmd 二进制）。
+  - 脚本已自动回退到 memory-core，流程成功结束。
+  - 当前 memory status 为 builtin + fts-only（未配置可用 embedding provider key）。
+
+- 参考文档：
+  - https://docs.openclaw.ai/concepts/memory
+  - https://docs.openclaw.ai/cli/memory
+  - https://docs.openclaw.ai/gateway/configuration-reference

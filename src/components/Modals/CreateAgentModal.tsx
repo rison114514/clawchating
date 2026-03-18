@@ -14,9 +14,17 @@ interface CreateAgentModalProps {
   isOpen: boolean;
   onClose: () => void;
   onCreate: (payload: CreateAgentPayload) => Promise<void>;
+  modelOptions?: Array<{ key: string; name?: string }>;
+  isLoadingModels?: boolean;
 }
 
-export function CreateAgentModal({ isOpen, onClose, onCreate }: CreateAgentModalProps) {
+export function CreateAgentModal({
+  isOpen,
+  onClose,
+  onCreate,
+  modelOptions = [],
+  isLoadingModels = false,
+}: CreateAgentModalProps) {
   const [agentId, setAgentId] = useState('');
   const [name, setName] = useState('');
   const [workspace, setWorkspace] = useState('');
@@ -121,12 +129,19 @@ export function CreateAgentModal({ isOpen, onClose, onCreate }: CreateAgentModal
 
           <div>
             <label className="block text-sm text-neutral-300 mb-1.5">Model（可选）</label>
-            <input
+            <select
               value={model}
               onChange={(e) => setModel(e.target.value)}
-              placeholder="例如: sglang/Qwen3.5-27B-FP8"
+              disabled={isLoadingModels}
               className="w-full rounded-lg bg-neutral-950 border border-neutral-800 px-3 py-2 text-sm text-neutral-200 focus:outline-none focus:border-indigo-500/60"
-            />
+            >
+              <option value="">{isLoadingModels ? '正在加载模型列表...' : '不指定（使用 OpenClaw 默认模型）'}</option>
+              {modelOptions.map((option) => (
+                <option key={option.key} value={option.key}>
+                  {option.name ? `${option.name} (${option.key})` : option.key}
+                </option>
+              ))}
+            </select>
           </div>
 
           <div>

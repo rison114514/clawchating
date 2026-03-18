@@ -8,6 +8,8 @@ import { DeleteAgentModal } from './Modals/DeleteAgentModal';
 interface SidebarProps {
   agents: Agent[];
   groups: Group[];
+  modelOptions: Array<{ key: string; name?: string }>;
+  isLoadingModelOptions: boolean;
   activeSession: SessionType;
   setActiveSession: (s: SessionType) => void;
   globalChannelId: string;
@@ -29,6 +31,8 @@ interface SidebarProps {
 export function Sidebar({
   agents,
   groups,
+  modelOptions,
+  isLoadingModelOptions,
   activeSession,
   setActiveSession,
   globalChannelId,
@@ -50,6 +54,8 @@ export function Sidebar({
         isOpen={isCreatingAgent}
         onClose={() => setIsCreatingAgent(false)}
         onCreate={createAgent}
+        modelOptions={modelOptions}
+        isLoadingModels={isLoadingModelOptions}
       />
       <DeleteAgentModal
         isOpen={!!deletingAgent}

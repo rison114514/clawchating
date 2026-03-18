@@ -13,6 +13,15 @@ type SessionMessage = {
   name?: string;
 };
 
+type GroupTimelineMessage = {
+  id: string;
+  role: SessionMessageRole;
+  content: string;
+  timestamp: number;
+  name?: string;
+  meta?: Record<string, unknown>;
+};
+
 type AgentCapabilities = {
   read: boolean;
   write: boolean;
@@ -199,6 +208,18 @@ async function appendJsonLine(filePath: string, payload: unknown) {
   await fs.appendFile(filePath, `${JSON.stringify(payload)}\n`, 'utf-8');
 }
 
+function sanitizeGroupFilePart(value: string | undefined, fallback: string) {
+  const normalized = (value || '').trim();
+  if (!normalized) return fallback;
+  return normalized.replace(/[^a-zA-Z0-9_-]/g, '_');
+}
+
+function getGroupTimelineFilePath(groupId: string, channelId: string) {
+  const safeGroupId = sanitizeGroupFilePart(groupId, 'group');
+  const safeChannelId = sanitizeGroupFilePart(channelId, 'default');
+  return path.join(process.cwd(), 'workspaces', safeGroupId, `.timeline-${safeChannelId}.jsonl`);
+}
+
 export async function ensureAgentSession(params: {
   agentId: string;
   peerId: string;
@@ -349,6 +370,95 @@ export async function loadSessionMessages(params: {
     .slice(-limit);
 }
 
+export async function appendGroupTimelineMessage(params: {
+  groupId: string;
+  channelId: string;
+  role: SessionMessageRole;
+  content: string;
+  name?: string;
+  meta?: Record<string, unknown>;
+}) {
+  const { groupId, channelId, role, content, name, meta } = params;
+  if (!groupId || !content.trim()) return;
+
+  const timelinePath = getGroupTimelineFilePath(groupId, channelId || 'default');
+  await fs.mkdir(path.dirname(timelinePath), { recursive: true });
+
+  const line: Record<string, unknown> = {
+    type: 'group_message',
+    id: randomUUID().slice(0, 8),
+    timestamp: new Date().toISOString(),
+    message: {
+      role,
+      content: [{ type: 'text', text: content }],
+      timestamp: Date.now(),
+      ...(name ? { name } : {}),
+      ...(meta ? { meta } : {}),
+    },
+  };
+
+  await appendJsonLine(timelinePath, line);
+}
+
+export async function loadGroupTimelineMessages(params: {
+  groupId: string;
+  channelId: string;
+  limit?: number;
+}) {
+  const { groupId, channelId, limit = 120 } = params;
+  if (!groupId) return [] as GroupTimelineMessage[];
+
+  const timelinePath = getGroupTimelineFilePath(groupId, channelId || 'default');
+  let content = '';
+  try {
+    content = await fs.readFile(timelinePath, 'utf-8');
+  } catch {
+    return [] as GroupTimelineMessage[];
+  }
+
+  const rows = content
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      try {
+        return JSON.parse(line) as {
+          type?: string;
+          message?: {
+            role?: SessionMessageRole;
+            content?: unknown;
+            timestamp?: number;
+            name?: string;
+            meta?: Record<string, unknown>;
+          };
+        };
+      } catch {
+        return null;
+      }
+    })
+    .filter((line) => line?.type === 'group_message' && !!line?.message?.role) as Array<{
+      message: {
+        role: SessionMessageRole;
+        content?: unknown;
+        timestamp?: number;
+        name?: string;
+        meta?: Record<string, unknown>;
+      };
+    }>;
+
+  return rows
+    .map((row) => ({
+      id: randomUUID().slice(0, 8),
+      role: row.message.role,
+      content: parseMessageText(row.message.content, row.message.role),
+      timestamp: row.message.timestamp || Date.now(),
+      ...(row.message.name ? { name: row.message.name } : {}),
+      ...(row.message.meta ? { meta: row.message.meta } : {}),
+    }))
+    .filter((row) => row.content)
+    .slice(-limit);
+}
+
 export async function initializeGroupSessions(params: {
   groupId: string;
   channelId: string;
@@ -356,10 +466,11 @@ export async function initializeGroupSessions(params: {
   ownerName?: string;
   memberAgentIds: string[];
 }) {
-  const peerId = sanitizePeerId(params.ownerUserId || params.channelId || `ou_group_${params.groupId}`);
+  const basePeer = sanitizePeerId(params.ownerUserId || params.channelId || `ou_group_${params.groupId}`);
+  const peerId = sanitizePeerId(`grp_${params.groupId}__ch_${params.channelId || 'default'}__${basePeer}`);
   const senderLabel = params.ownerName || 'Clawchating User';
 
-  const results: Array<{ agentId: string; sessionKey: string; sessionId: string }> = [];
+  const results: Array<{ agentId: string; sessionKey: string; sessionId: string; workspaceDir: string }> = [];
 
   for (const agentId of params.memberAgentIds) {
     const session = await ensureAgentSession({
@@ -367,7 +478,12 @@ export async function initializeGroupSessions(params: {
       peerId,
       senderLabel,
     });
-    results.push({ agentId, sessionKey: session.sessionKey, sessionId: session.sessionId });
+    results.push({
+      agentId,
+      sessionKey: session.sessionKey,
+      sessionId: session.sessionId,
+      workspaceDir: session.profile.workspaceDir,
+    });
   }
 
   return results;

@@ -34,3 +34,38 @@ You can check out [the Next.js GitHub repository](https://github.com/vercel/next
 The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
 
 Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+
+## OpenClaw QMD Memory Quick Start
+
+This project includes a one-click script to optimize OpenClaw memory retrieval and attempt enabling the QMD backend.
+
+Requirements:
+
+- OpenClaw version >= 2026.2.2
+- The script will try to install `bun`, `qmd`, and `sqlite3` automatically when missing.
+
+Run optimization without restart:
+
+```bash
+npm run qmd:enable
+```
+
+Run optimization and restart gateway service:
+
+```bash
+npm run qmd:enable:restart
+```
+
+What the script does:
+
+- Enables hybrid memory search tuning (vector + BM25 + MMR + temporal decay).
+- Ensures each agent workspace has a memory/ directory.
+- Attempts to enable QMD (`memory.backend = "qmd"`, `memory.qmd.limits.timeoutMs = 8000`).
+- Automatically falls back to `memory-core` if validation fails.
+- Forces one memory reindex and prints deep memory status summary.
+
+Official docs used:
+
+- https://docs.openclaw.ai/concepts/memory
+- https://docs.openclaw.ai/cli/memory
+- https://docs.openclaw.ai/gateway/configuration-reference

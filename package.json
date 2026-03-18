@@ -7,7 +7,9 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "plugin:clawchating-ws": "tsx src/plugins/clawchating-ws-plugin.ts"
+    "plugin:clawchating-ws": "tsx src/plugins/clawchating-ws-plugin.ts",
+    "qmd:enable": "bash scripts/enable-qmd.sh",
+    "qmd:enable:restart": "bash scripts/enable-qmd.sh --restart"
   },
   "dependencies": {
     "@ai-sdk/openai": "^0.0.61",

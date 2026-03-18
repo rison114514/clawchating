@@ -33,3 +33,9 @@ export type CronTask = {
   lastRun?: number;
   active?: boolean;
 };
+
+export type WorkspaceEntry = {
+  name: string;
+  isDirectory: boolean;
+  path: string;
+};

@@ -1,24 +1,16 @@
-import { createOpenAI } from '@ai-sdk/openai';
-import { generateText, tool } from 'ai';
-import { z } from 'zod';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import os from 'os';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import {
+  appendGroupTimelineMessage,
   appendSessionMessage,
   ensureAgentSession,
   initializeGroupSessions,
-  loadSessionMessages,
   resolvePeerId,
   toSemanticInput,
 } from '@/lib/session-runtime';
-
-const openclawGateway = createOpenAI({
-  baseURL: 'http://127.0.0.1:18789/v1',
-  apiKey: process.env.OPENCLAW_API_KEY,
-});
 
 export const maxDuration = 120;
 
@@ -43,23 +35,13 @@ type OpenClawAgent = {
   };
 };
 
-type OpenClawProvider = {
-  baseUrl?: string;
-  apiKey?: string;
-  models?: Array<{ id?: string }>;
-};
-
 type OpenClawConfig = {
   commands?: {
     nativeSkills?: 'on' | 'off' | 'auto' | string;
   };
-  models?: {
-    providers?: Record<string, OpenClawProvider>;
-  };
   agents?: {
     defaults?: {
       workspace?: string;
-      model?: string | { primary?: string };
     };
     list?: OpenClawAgent[];
   };
@@ -75,15 +57,6 @@ type GroupRecord = {
   members: string[];
 };
 
-type MessageLike = {
-  role?: string;
-  content?: unknown;
-  name?: string;
-  [key: string]: unknown;
-};
-
-type GenerateTools = NonNullable<Parameters<typeof generateText>[0]['tools']>;
-
 type OpenClawSkill = {
   name: string;
   description?: string;
@@ -92,6 +65,8 @@ type OpenClawSkill = {
 };
 
 const execFileAsync = promisify(execFile);
+const MAX_RELAY_DEPTH = 2;
+const MAX_RELAY_TARGETS = 2;
 
 const DEFAULT_CAPABILITIES: AgentCapabilities = { read: true, write: true, exec: false, invite: false, skills: true };
 
@@ -156,46 +131,6 @@ async function listEligibleSkills() {
   }
 }
 
-function getPrimaryModelRef(model: string | { primary?: string } | undefined) {
-  if (!model) return '';
-  if (typeof model === 'string') return model;
-  return model.primary || '';
-}
-
-function parseModelRef(modelRef: string) {
-  const idx = modelRef.indexOf('/');
-  if (idx === -1) {
-    return { providerId: '', modelId: modelRef };
-  }
-  return {
-    providerId: modelRef.slice(0, idx),
-    modelId: modelRef.slice(idx + 1),
-  };
-}
-
-function normalizeBaseUrl(baseUrl: string) {
-  return baseUrl.endsWith('/v1') ? baseUrl : `${baseUrl.replace(/\/$/, '')}/v1`;
-}
-
-function resolveUpstreamModel(config: OpenClawConfig, agent: OpenClawAgent | undefined) {
-  const modelRef = getPrimaryModelRef(agent?.model) || getPrimaryModelRef(config?.agents?.defaults?.model);
-  if (!modelRef) return null;
-
-  const { providerId, modelId } = parseModelRef(modelRef);
-  if (!providerId || !modelId) return null;
-
-  const provider = config.models?.providers?.[providerId];
-  if (!provider?.baseUrl) return null;
-
-  const resolvedModelId = modelId || provider.models?.[0]?.id;
-  if (!resolvedModelId) return null;
-
-  return {
-    baseURL: normalizeBaseUrl(provider.baseUrl),
-    apiKey: provider.apiKey || process.env.OPENCLAW_API_KEY || '',
-    modelId: resolvedModelId,
-  };
-}
 
 async function getOpenClawConfig() {
   try {
@@ -206,6 +141,74 @@ async function getOpenClawConfig() {
   } catch {
     return {} as OpenClawConfig;
   }
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function buildMentionAliasMap(
+  groupMembers: string[],
+  agentMap: Map<string, OpenClawAgent>
+) {
+  const aliasToAgentId = new Map<string, string>();
+  for (const memberId of groupMembers) {
+    const normalizedId = String(memberId || '').trim();
+    if (!normalizedId) continue;
+    aliasToAgentId.set(normalizedId.toLowerCase(), normalizedId);
+    const displayName = String(agentMap.get(normalizedId)?.name || '').trim();
+    if (displayName) {
+      aliasToAgentId.set(displayName.toLowerCase(), normalizedId);
+    }
+  }
+  return aliasToAgentId;
+}
+
+function extractMentionTargets(text: string, aliasToAgentId: Map<string, string>) {
+  const targets = new Set<string>();
+
+  for (const match of text.matchAll(/@([a-zA-Z0-9_-]+)/g)) {
+    const alias = (match[1] || '').toLowerCase();
+    const target = aliasToAgentId.get(alias);
+    if (target) targets.add(target);
+  }
+
+  const aliases = Array.from(aliasToAgentId.keys()).sort((a, b) => b.length - a.length);
+  for (const alias of aliases) {
+    if (!alias) continue;
+    const pattern = new RegExp(`@${escapeRegExp(alias)}(?=\\s|$|[，。,.!?！？:：;；])`, 'gi');
+    if (!pattern.test(text)) continue;
+    const target = aliasToAgentId.get(alias);
+    if (target) targets.add(target);
+  }
+
+  return Array.from(targets);
+}
+
+function buildGroupMembersPromptSection(groupMembers: string[], agentMap: Map<string, OpenClawAgent>) {
+  const rows = groupMembers.map((memberId) => {
+    const displayName = (agentMap.get(memberId)?.name || '').trim();
+    const aliases = displayName && displayName !== memberId
+      ? `${memberId}, ${displayName}`
+      : memberId;
+    return `- agentId=${memberId}; aliases=${aliases}`;
+  });
+
+  return [
+    '[GroupMembersFromSystem]',
+    '成员列表由系统直接提供，不要查询飞书或任何外部通讯录。',
+    rows.join('\n') || '- none',
+  ].join('\n');
+}
+
+function buildGroupCollaborationRulesSection() {
+  return [
+    '[GroupCollaborationProtocol]',
+    '在群组模式下，若你要呼叫其他成员，直接在回复文本里写 @agentId 或 @显示名 即可。',
+    '系统会自动解析并路由给对应成员，你不需要调用额外的消息发送工具。',
+    '禁止声称“无法发送消息”“@mention失败”或“权限不足导致无法呼叫”。',
+    '若要呼叫，请直接给出简洁明确的协作指令。',
+  ].join('\n');
 }
 
 export async function POST(req: Request) {
@@ -219,6 +222,9 @@ export async function POST(req: Request) {
     senderId,
     senderName,
     autoMentionName,
+    relayDepth = 0,
+    relayChain = [],
+    relayFrom,
     capabilities = DEFAULT_CAPABILITIES,
   } = await req.json();
 
@@ -235,42 +241,6 @@ export async function POST(req: Request) {
     return new Response(JSON.stringify({ error: `Unknown agentId: ${requestedAgentId}` }), { status: 400 });
   }
 
-  const resolvedAgentConfig = agentMap.get(requestedAgentId);
-  const resolvedAgentDisplayName = resolvedAgentConfig?.name || requestedAgentId;
-  const openClawCapabilities = resolvedAgentConfig
-    ? getCapabilitiesFromOpenClawTools(resolvedAgentConfig, openClawConfig)
-    : DEFAULT_CAPABILITIES;
-  const effectiveCapabilities: AgentCapabilities = {
-    read: !!capabilities?.read && openClawCapabilities.read,
-    write: !!capabilities?.write && openClawCapabilities.write,
-    exec: !!capabilities?.exec && openClawCapabilities.exec,
-    invite: !!capabilities?.invite && openClawCapabilities.invite,
-    skills: !!capabilities?.skills && openClawCapabilities.skills,
-  };
-
-  const workspaceFolderName = sessionType === 'group'
-    ? (groupId || channelId || 'default-workspace')
-    : (channelId || 'default-workspace');
-  const workspaceDir = path.join(process.cwd(), 'workspaces', workspaceFolderName);
-  const agentWorkspaceDir = resolvedAgentConfig?.workspace
-    || openClawConfig?.agents?.defaults?.workspace
-    || workspaceDir;
-  
-  await fs.mkdir(workspaceDir, { recursive: true });
-  await fs.mkdir(agentWorkspaceDir, { recursive: true });
-
-  const resolveScopeDir = (scope?: 'shared' | 'agent') => (scope === 'agent' ? agentWorkspaceDir : workspaceDir);
-
-  const resolveScopedPath = (filename: string, scope?: 'shared' | 'agent') => {
-    const baseDir = resolveScopeDir(scope);
-    const baseResolved = path.resolve(baseDir);
-    const targetPath = path.resolve(baseDir, filename);
-    if (targetPath !== baseResolved && !targetPath.startsWith(`${baseResolved}${path.sep}`)) {
-      throw new Error('Path escapes workspace root.');
-    }
-    return targetPath;
-  };
-
   if (sessionType === 'group' && groupId && Array.isArray(groupMembers) && groupMembers.length > 0) {
     await initializeGroupSessions({
       groupId,
@@ -281,293 +251,263 @@ export async function POST(req: Request) {
     });
   }
 
-  const peerId = resolvePeerId(typeof senderId === 'string' ? senderId : undefined, channelId);
-  const session = await ensureAgentSession({
-    agentId: requestedAgentId,
-    peerId,
-    senderLabel: typeof senderName === 'string' && senderName.trim() ? senderName : 'Clawchating User',
-  });
+  const safeRelayDepth = Math.max(0, Number(relayDepth) || 0);
+  const safeRelayChain = Array.isArray(relayChain) ? relayChain.map((item) => String(item)) : [];
 
-  const eligibleSkills = effectiveCapabilities.skills ? await listEligibleSkills() : [];
-  const skillTips = eligibleSkills
-    .slice(0, 16)
-    .map((s) => `- ${s.name}: ${(s.description || '').replace(/\s+/g, ' ').trim().slice(0, 140)}`)
-    .join('\n');
+  const groupMemberIds = sessionType === 'group' && Array.isArray(groupMembers)
+    ? Array.from(new Set(groupMembers.map((item) => String(item || '').trim()).filter(Boolean)))
+    : [];
+  const mentionAliasMap = buildMentionAliasMap(groupMemberIds, agentMap);
 
-  const systemInstructions = `
-你是 OpenClaw 集群中的一个 AI Agent，当前身份是: ${requestedAgentId}。
-你的展示名称是: ${resolvedAgentDisplayName}。
-你正在 ${sessionType === 'group' ? '群组协作' : '单人独立'} 模式下工作。
-当前所处的业务频道(Channel)是: ${channelId}。
-${sessionType === 'group' ? `你有群组伙伴: ${groupMembers?.join(', ')}。` : ''}
+  const executeTurn = async (params: {
+    targetAgentId: string;
+    turnInputText: string;
+    turnSenderId?: string;
+    turnSenderName?: string;
+    turnRelayDepth: number;
+    turnRelayChain: string[];
+    turnRelayFrom?: string;
+    requestedCaps?: AgentCapabilities;
+  }): Promise<{
+    sessionKey: string;
+    sessionId: string;
+    message: { id: string; role: 'assistant'; content: string; name: string };
+    usage: unknown;
+    relayedMessages: Array<{ id: string; role: 'assistant'; content: string; name: string }>;
+  }> => {
+    const targetAgentId = params.targetAgentId.trim();
+    const turnSenderName = (params.turnSenderName || '').trim() || 'Clawchating User';
+    const turnInputText = String(params.turnInputText || '');
 
-【工作区权限】
-你的权限经过平台限制，当前是否拥有读取文件权限：${effectiveCapabilities.read ? '是' : '否'}。
-是否拥有写入文件权限：${effectiveCapabilities.write ? '是' : '否'}。
-是否拥有执行命令权限：${effectiveCapabilities.exec ? '是' : '否'}。
-是否拥有原生技能权限：${effectiveCapabilities.skills ? '是' : '否'}。
+    const targetAgentConfig = agentMap.get(targetAgentId);
+    if (agentMap.size > 0 && !targetAgentConfig) {
+      throw new Error(`Unknown relay target agent: ${targetAgentId}`);
+    }
 
-你在群组共享的本地工作夹是：${workspaceFolderName}。
-你自己的 Agent 工作区目录是：${agentWorkspaceDir}。
-工具支持 scope 参数：shared 表示群组共享工作区，agent 表示你自己的 Agent 工作区。
-如果拥有相应权限，请积极使用工具辅助用户。工具无需传绝对路径，传相对路径即可。
+    const targetDisplayName = targetAgentConfig?.name || targetAgentId;
+    const openClawCapabilities = targetAgentConfig
+      ? getCapabilitiesFromOpenClawTools(targetAgentConfig, openClawConfig)
+      : DEFAULT_CAPABILITIES;
+    const capSource = params.requestedCaps || DEFAULT_CAPABILITIES;
+    const effectiveCapabilities: AgentCapabilities = {
+      read: !!capSource.read && openClawCapabilities.read,
+      write: !!capSource.write && openClawCapabilities.write,
+      exec: !!capSource.exec && openClawCapabilities.exec,
+      invite: !!capSource.invite && openClawCapabilities.invite,
+      skills: !!capSource.skills && openClawCapabilities.skills,
+    };
 
-【OpenClaw 原生 Skills】
-${effectiveCapabilities.skills ? `你可以调用 list_native_skills / read_native_skill / use_native_skill。\n可用技能(节选):\n${skillTips || '- 无可用技能'}\n当任务明显匹配某个技能时，优先触发对应技能。` : '当前已禁用原生技能。'}
-`;
+    const workspaceFolderName = sessionType === 'group'
+      ? (groupId || channelId || 'default-workspace')
+      : (channelId || 'default-workspace');
+    const workspaceDir = path.join(process.cwd(), 'workspaces', workspaceFolderName);
+    const agentWorkspaceDir = targetAgentConfig?.workspace
+      || openClawConfig?.agents?.defaults?.workspace
+      || workspaceDir;
+    await fs.mkdir(workspaceDir, { recursive: true });
+    await fs.mkdir(agentWorkspaceDir, { recursive: true });
 
-  const agentTools: GenerateTools = {};
+    const basePeerId = resolvePeerId(typeof params.turnSenderId === 'string' ? params.turnSenderId : undefined, channelId);
+    const peerId = sessionType === 'group'
+      ? `grp_${groupId || 'unknown'}__ch_${channelId || 'default'}__${basePeerId}`
+      : basePeerId;
 
-  if (effectiveCapabilities.invite && sessionType === 'group' && groupId) {
-    agentTools.invite_agent = tool({
-      description: 'Invite another agent to the current group chat by their agent ID. Only use this if you know the exact ID of the agent.',
-      parameters: z.object({ newAgentId: z.string() }),
-      execute: async ({ newAgentId }) => {
-        try {
-          const groupsPath = path.join(process.cwd(), 'workspaces', 'groups.json');
-          const data = await fs.readFile(groupsPath, 'utf-8');
-          const groups = JSON.parse(data) as GroupRecord[];
-          const groupIndex = groups.findIndex((g) => g.id === groupId);
-          if (groupIndex === -1) return `Error: Group not found.`;
-          
-          if (!groups[groupIndex].members.includes(newAgentId)) {
-            // we could verify the agent id, but assuming it exists
-            groups[groupIndex].members.push(newAgentId);
-            await fs.writeFile(groupsPath, JSON.stringify(groups, null, 2));
-            return `Successfully invited agent ${newAgentId} to the group. `;
-          } else {
-            return `Agent ${newAgentId} is already in the group.`;
-          }
-        } catch (e: unknown) { return `Error: ${getErrorMessage(e)}`; }
-      }
-    });
-  }
-
-
-  if (effectiveCapabilities.read) {
-    agentTools.read_file = tool({
-      description: 'Read a file. scope="shared" reads from shared workspace; scope="agent" reads from your personal agent workspace.',
-      parameters: z.object({ filename: z.string(), scope: z.enum(['shared', 'agent']).optional() }),
-      execute: async ({ filename, scope }) => {
-        try {
-          const targetPath = resolveScopedPath(filename, scope);
-          return await fs.readFile(targetPath, 'utf8');
-        }
-        catch (e: unknown) { return `Error: ${getErrorMessage(e)}`; }
-      },
-    });
-    agentTools.list_files = tool({
-      description: 'List files. scope can be shared, agent, or both (default both).',
-      parameters: z.object({ scope: z.enum(['shared', 'agent', 'both']).optional() }),
-      execute: async ({ scope }) => {
-        try {
-          if (scope === 'shared') {
-            const files = await fs.readdir(workspaceDir);
-            return files.length ? files.join('\n') : 'Shared workspace is empty.';
-          }
-          if (scope === 'agent') {
-            const files = await fs.readdir(agentWorkspaceDir);
-            return files.length ? files.join('\n') : 'Agent workspace is empty.';
-          }
-
-          const [sharedFiles, agentFiles] = await Promise.all([
-            fs.readdir(workspaceDir).catch(() => [] as string[]),
-            fs.readdir(agentWorkspaceDir).catch(() => [] as string[]),
-          ]);
-
-          const sharedText = sharedFiles.length ? sharedFiles.join('\n') : '(empty)';
-          const agentText = agentFiles.length ? agentFiles.join('\n') : '(empty)';
-          return `# shared\n${sharedText}\n\n# agent\n${agentText}`;
-        }
-        catch (e: unknown) { return `Error: ${getErrorMessage(e)}`; }
-      },
-    });
-  }
-
-  if (effectiveCapabilities.write) {
-    agentTools.write_file = tool({
-      description: 'Write a file. scope="shared" writes to shared workspace; scope="agent" writes to your personal agent workspace.',
-      parameters: z.object({ filename: z.string(), content: z.string(), scope: z.enum(['shared', 'agent']).optional() }),
-      execute: async ({ filename, content, scope }) => {
-        try {
-          const targetPath = resolveScopedPath(filename, scope);
-          await fs.mkdir(path.dirname(targetPath), { recursive: true });
-          await fs.writeFile(targetPath, content, 'utf8');
-          return `Successfully wrote to ${filename} (${scope === 'agent' ? 'agent' : 'shared'})`;
-        } catch (e: unknown) { return `Error: ${getErrorMessage(e)}`; }
-      },
-    });
-  }
-
-  if (effectiveCapabilities.exec) {
-    agentTools.execute_command = tool({
-      description: 'Execute a bash/shell command. scope="shared" runs in shared workspace; scope="agent" runs in your personal agent workspace.',
-      parameters: z.object({ command: z.string(), scope: z.enum(['shared', 'agent']).optional() }),
-      execute: async ({ command, scope }) => {
-        try {
-          const { exec } = await import('child_process');
-          const util = await import('util');
-          const cwd = resolveScopeDir(scope);
-          const { stdout, stderr } = await util.promisify(exec)(command, { cwd, timeout: 10000 });
-          return (stdout ? `STDOUT:\n${stdout}\n` : '') + (stderr ? `STDERR:\n${stderr}\n` : '') || 'Command executed successfully.';
-        } catch (e: unknown) { return `Error Executing ${command}: ${getErrorMessage(e)}`; }
-      },
-    });
-  }
-
-  if (effectiveCapabilities.skills) {
-    agentTools.list_native_skills = tool({
-      description: 'List current OpenClaw native skills available for this runtime.',
-      parameters: z.object({}),
-      execute: async () => {
-        try {
-          const lines = eligibleSkills.map((skill) => {
-            const desc = (skill.description || '').replace(/\s+/g, ' ').trim();
-            return `- ${skill.name}${desc ? `: ${desc}` : ''}`;
-          });
-          return lines.length ? lines.join('\n') : 'No eligible native skills found.';
-        } catch (e: unknown) {
-          return `Error: ${getErrorMessage(e)}`;
-        }
-      },
+    const session = await ensureAgentSession({
+      agentId: targetAgentId,
+      peerId,
+      senderLabel: turnSenderName,
     });
 
-    agentTools.read_native_skill = tool({
-      description: 'Read one native OpenClaw skill details and SKILL.md content by skill name.',
-      parameters: z.object({ skillName: z.string() }),
-      execute: async ({ skillName }) => {
-        try {
-          const detail = await runOpenClawJson(['skills', 'info', skillName, '--json'], 20000);
-          const filePath = typeof detail.filePath === 'string' ? detail.filePath : '';
-          let skillMd = '';
-          if (filePath) {
-            try {
-              skillMd = await fs.readFile(filePath, 'utf8');
-            } catch {
-              skillMd = '';
-            }
-          }
+    const eligibleSkills = effectiveCapabilities.skills ? await listEligibleSkills() : [];
+    const skillTips = eligibleSkills
+      .slice(0, 12)
+      .map((s) => `- ${s.name}: ${(s.description || '').replace(/\s+/g, ' ').trim().slice(0, 100)}`)
+      .join('\n');
 
-          const summary = {
-            name: typeof detail.name === 'string' ? detail.name : skillName,
-            description: typeof detail.description === 'string' ? detail.description : '',
-            eligible: !!detail.eligible,
-            source: typeof detail.source === 'string' ? detail.source : '',
-            filePath,
-          };
-
-          const truncated = skillMd.length > 30000 ? `${skillMd.slice(0, 30000)}\n\n[Truncated]` : skillMd;
-          return `${JSON.stringify(summary, null, 2)}\n\n--- SKILL.md ---\n${truncated || '(skill file not found or empty)'}`;
-        } catch (e: unknown) {
-          return `Error: ${getErrorMessage(e)}`;
-        }
-      },
+    const semanticInput = toSemanticInput({
+      senderId: peerId,
+      senderName: turnSenderName,
+      rawText: turnInputText,
+      autoMentionName: typeof autoMentionName === 'string' ? autoMentionName : undefined,
     });
 
-    agentTools.use_native_skill = tool({
-      description: 'Delegate a subtask to OpenClaw native agent runtime (with native skills pipeline) and return result text.',
-      parameters: z.object({
-        task: z.string(),
-        skillHint: z.string().optional(),
-      }),
-      execute: async ({ task, skillHint }) => {
-        try {
-          const delegatedPrompt = skillHint
-            ? `[SkillHint: ${skillHint}]\n${task}`
-            : task;
-          const data = await runOpenClawJson(
-            ['agent', '--agent', requestedAgentId, '--session-id', session.sessionKey, '--message', delegatedPrompt, '--json', '--timeout', '120'],
-            125000
-          );
-
-          const result = (data.result && typeof data.result === 'object') ? (data.result as Record<string, unknown>) : {};
-          const payloads = Array.isArray(result.payloads) ? result.payloads : [];
-          const text = payloads
-            .map((item) => {
-              if (!item || typeof item !== 'object') return '';
-              const record = item as Record<string, unknown>;
-              return typeof record.text === 'string' ? record.text : '';
-            })
-            .filter(Boolean)
-            .join('\n');
-
-          if (text) return text;
-          return JSON.stringify(data, null, 2);
-        } catch (e: unknown) {
-          return `Error: ${getErrorMessage(e)}`;
-        }
-      },
+    await appendSessionMessage({
+      agentId: targetAgentId,
+      sessionId: session.sessionId,
+      role: 'user',
+      content: semanticInput.text,
     });
-  }
 
-  const history = await loadSessionMessages({ agentId: requestedAgentId, sessionKey: session.sessionKey, limit: 24 });
-  const semanticInput = toSemanticInput({
-    senderId: peerId,
-    senderName: typeof senderName === 'string' && senderName.trim() ? senderName : 'Clawchating User',
-    rawText: typeof inputText === 'string' ? inputText : '',
-    autoMentionName: typeof autoMentionName === 'string' ? autoMentionName : undefined,
-  });
+    if (sessionType === 'group' && groupId && params.turnRelayDepth === 0) {
+      await appendGroupTimelineMessage({
+        groupId,
+        channelId: channelId || 'default',
+        role: 'user',
+        content: turnInputText,
+        name: turnSenderName,
+        meta: {
+          to: targetAgentId,
+          relayDepth: params.turnRelayDepth,
+          relayFrom: params.turnRelayFrom || null,
+        },
+      });
+    }
 
-  await appendSessionMessage({
-    agentId: requestedAgentId,
-    sessionId: session.sessionId,
-    role: 'user',
-    content: semanticInput.text,
-  });
+    const nativePrompt = [
+      `[ClawchatingContext] mode=${sessionType} groupId=${groupId || ''} channelId=${channelId || ''}`,
+      `[Identity] agentId=${targetAgentId} displayName=${targetDisplayName}`,
+      `[Workspace] shared=${workspaceDir} agent=${agentWorkspaceDir}`,
+      `[Capability] read=${effectiveCapabilities.read} write=${effectiveCapabilities.write} exec=${effectiveCapabilities.exec} invite=${effectiveCapabilities.invite} skills=${effectiveCapabilities.skills}`,
+      sessionType === 'group'
+        ? buildGroupMembersPromptSection(groupMemberIds, agentMap)
+        : '[GroupMembersFromSystem]\n- n/a',
+      sessionType === 'group'
+        ? buildGroupCollaborationRulesSection()
+        : '[GroupCollaborationProtocol]\n- n/a',
+      effectiveCapabilities.skills
+        ? `[EligibleSkills]\n${skillTips || '- none'}`
+        : '[EligibleSkills]\n- disabled',
+      '[UserMessage]',
+      semanticInput.text,
+    ].join('\n');
 
-  const historyMessages = history.map((m: MessageLike) => ({
-    role: m.role === 'assistant' ? 'assistant' : 'user',
-    content:
-      m.role === 'assistant' && m.name
-        ? `[By Agent: ${m.name}]\n${typeof m.content === 'string' ? m.content : ''}`
-        : typeof m.content === 'string'
-          ? m.content
-          : '',
-  })) as NonNullable<Parameters<typeof generateText>[0]['messages']>;
+    const data = await runOpenClawJson(
+      ['agent', '--agent', targetAgentId, '--session-id', session.sessionKey, '--message', nativePrompt, '--json', '--timeout', '120'],
+      125000
+    );
+    const result = (data.result && typeof data.result === 'object') ? (data.result as Record<string, unknown>) : {};
+    const payloads = Array.isArray(result.payloads) ? result.payloads : [];
+    const responseText = payloads
+      .map((item) => {
+        if (!item || typeof item !== 'object') return '';
+        const record = item as Record<string, unknown>;
+        return typeof record.text === 'string' ? record.text : '';
+      })
+      .filter(Boolean)
+      .join('\n') || JSON.stringify(data, null, 2);
+    const usage = result.usage;
 
-  const promptMessages = [
-    ...historyMessages,
-    { role: 'user' as const, content: semanticInput.text },
-  ] as NonNullable<Parameters<typeof generateText>[0]['messages']>;
+    await appendSessionMessage({
+      agentId: targetAgentId,
+      sessionId: session.sessionId,
+      role: 'assistant',
+      content: responseText,
+      name: targetAgentId,
+    });
 
-  const response = await generateText({
-    model: (() => {
-      const upstream = resolveUpstreamModel(openClawConfig, resolvedAgentConfig);
-      if (upstream) {
-        const upstreamClient = createOpenAI({
-          baseURL: upstream.baseURL,
-          apiKey: upstream.apiKey,
+    if (sessionType === 'group' && groupId) {
+      await appendGroupTimelineMessage({
+        groupId,
+        channelId: channelId || 'default',
+        role: 'assistant',
+        content: responseText,
+        name: targetAgentId,
+        meta: {
+          relayDepth: params.turnRelayDepth,
+          relayFrom: params.turnRelayFrom || null,
+        },
+      });
+    }
+
+    const rawTargets = sessionType === 'group'
+      ? extractMentionTargets(responseText, mentionAliasMap)
+      : [];
+    console.info('[mention_parse]', {
+      groupId,
+      channelId,
+      sourceAgentId: targetAgentId,
+      relayDepth: params.turnRelayDepth,
+      parsedTargets: rawTargets,
+    });
+
+    const relayedMessages: Array<{ id: string; role: 'assistant'; content: string; name: string }> = [];
+    if (sessionType === 'group' && groupId) {
+      if (params.turnRelayDepth >= MAX_RELAY_DEPTH && rawTargets.length > 0) {
+        console.info('[relay_drop]', {
+          reason: 'max_depth_reached',
+          groupId,
+          channelId,
+          sourceAgentId: targetAgentId,
+          relayDepth: params.turnRelayDepth,
+          targets: rawTargets,
         });
-        return upstreamClient(upstream.modelId);
+      } else {
+        const nextTargets = rawTargets
+          .filter((target) => target !== targetAgentId)
+          .filter((target) => groupMemberIds.includes(target))
+          .filter((target) => !params.turnRelayChain.includes(target))
+          .slice(0, MAX_RELAY_TARGETS);
+
+        if (nextTargets.length === 0 && rawTargets.length > 0) {
+          console.info('[relay_drop]', {
+            reason: 'invalid_or_duplicate_targets',
+            groupId,
+            channelId,
+            sourceAgentId: targetAgentId,
+            rawTargets,
+            relayChain: params.turnRelayChain,
+          });
+        }
+
+        for (const nextTarget of nextTargets) {
+          console.info('[relay_dispatch]', {
+            groupId,
+            channelId,
+            from: targetAgentId,
+            to: nextTarget,
+            relayDepth: params.turnRelayDepth + 1,
+          });
+
+          const relayInput = [
+            `[Relay Task] 来自群成员 @${targetAgentId} 的协作请求。`,
+            '请基于以下上下文执行，并给出可直接用于群协作的结果。',
+            '[Original Message]',
+            responseText,
+          ].join('\n');
+
+          const relayResult = await executeTurn({
+            targetAgentId: nextTarget,
+            turnInputText: relayInput,
+            turnSenderId: `agent_${targetAgentId}`,
+            turnSenderName: targetDisplayName,
+            turnRelayDepth: params.turnRelayDepth + 1,
+            turnRelayChain: [...params.turnRelayChain, targetAgentId],
+            turnRelayFrom: targetAgentId,
+            requestedCaps: DEFAULT_CAPABILITIES,
+          });
+
+          relayedMessages.push(relayResult.message, ...relayResult.relayedMessages);
+        }
       }
-      return openclawGateway(requestedAgentId);
-    })(),
-    messages: promptMessages,
-    system: systemInstructions,
-    tools: Object.keys(agentTools).length > 0 ? agentTools : undefined,
-    maxSteps: 6,
-  });
+    }
 
-  await appendSessionMessage({
-    agentId: requestedAgentId,
-    sessionId: session.sessionId,
-    role: 'assistant',
-    content: response.text,
-    name: requestedAgentId,
-  });
-
-  return new Response(
-    JSON.stringify({
+    return {
       sessionKey: session.sessionKey,
       sessionId: session.sessionId,
       message: {
-        id: `${Date.now()}`,
+        id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         role: 'assistant',
-        content: response.text,
-        name: requestedAgentId,
+        content: responseText,
+        name: targetAgentId,
       },
-      usage: response.usage,
-    }),
+      usage,
+      relayedMessages,
+    };
+  };
+
+  const result = await executeTurn({
+    targetAgentId: requestedAgentId,
+    turnInputText: typeof inputText === 'string' ? inputText : '',
+    turnSenderId: typeof senderId === 'string' ? senderId : undefined,
+    turnSenderName: typeof senderName === 'string' ? senderName : undefined,
+    turnRelayDepth: safeRelayDepth,
+    turnRelayChain: safeRelayChain,
+    turnRelayFrom: typeof relayFrom === 'string' ? relayFrom : undefined,
+    requestedCaps: capabilities,
+  });
+
+  return new Response(
+    JSON.stringify(result),
     { headers: { 'Content-Type': 'application/json' } }
   );
 }

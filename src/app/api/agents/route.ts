@@ -56,6 +56,16 @@ type NativeAgentSummary = {
   isDefault?: boolean;
 };
 
+type OpenClawModelSummary = {
+  key: string;
+  name?: string;
+  input?: string;
+  contextWindow?: number;
+  available: boolean;
+  local?: boolean;
+  tags: string[];
+};
+
 const execFileAsync = promisify(execFile);
 
 function parseJsonFromMixedOutput(stdout: string, stderr: string) {
@@ -127,6 +137,59 @@ async function loadNativeAgents() {
   }
 }
 
+async function loadAvailableModels() {
+  const commandVariants: string[][] = [
+    ['model', 'list', '--json'],
+    ['models', 'list', '--json'],
+  ];
+
+  try {
+    let parsed: unknown = null;
+
+    for (const args of commandVariants) {
+      try {
+        const { stdout, stderr } = await execFileAsync('openclaw', args, {
+          cwd: process.cwd(),
+          timeout: 30000,
+          maxBuffer: 1024 * 1024,
+        });
+        parsed = parseJsonFromMixedOutput(stdout, stderr);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          break;
+        }
+      } catch {
+        // Try the next command variant.
+      }
+    }
+
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return [] as OpenClawModelSummary[];
+
+    const modelsRaw = Array.isArray((parsed as Record<string, unknown>).models)
+      ? (parsed as Record<string, unknown>).models as unknown[]
+      : [];
+
+    return modelsRaw
+      .filter((item) => item && typeof item === 'object')
+      .map((item) => {
+        const row = item as Record<string, unknown>;
+        return {
+          key: typeof row.key === 'string' ? row.key : '',
+          name: typeof row.name === 'string' ? row.name : undefined,
+          input: typeof row.input === 'string' ? row.input : undefined,
+          contextWindow: typeof row.contextWindow === 'number' ? row.contextWindow : undefined,
+          available: !!row.available,
+          local: typeof row.local === 'boolean' ? row.local : undefined,
+          tags: Array.isArray(row.tags)
+            ? row.tags.map((tag) => String(tag)).filter(Boolean)
+            : [],
+        } as OpenClawModelSummary;
+      })
+      .filter((model) => model.key && model.available);
+  } catch {
+    return [] as OpenClawModelSummary[];
+  }
+}
+
 function setDefaultAgentsInConfig(config: OpenClawConfig, targetIds: string[]) {
   const list = config.agents?.list;
   if (!Array.isArray(list)) return false;
@@ -188,8 +251,15 @@ function applyCapabilitiesToAlsoAllow(existing: string[], capabilities: AgentCap
   return Array.from(next);
 }
 
-export async function GET() {
+export async function GET(req: Request) {
   try {
+    const { searchParams } = new URL(req.url);
+    const requestedResource = (searchParams.get('resource') || searchParams.get('type') || '').trim();
+    if (requestedResource === 'models') {
+      const models = await loadAvailableModels();
+      return NextResponse.json({ models });
+    }
+
     const homedir = os.homedir();
     const configPath = path.join(homedir, '.openclaw', 'openclaw.json');
     if (!fs.existsSync(configPath)) {
@@ -364,13 +434,6 @@ export async function POST(req: Request) {
 
     const home = os.homedir();
     const configPath = path.join(home, '.openclaw', 'openclaw.json');
-    const preConfig = fs.existsSync(configPath)
-      ? (JSON.parse(fs.readFileSync(configPath, 'utf8')) as OpenClawConfig)
-      : ({} as OpenClawConfig);
-    const previousDefaultIds = Array.isArray(preConfig.agents?.list)
-      ? preConfig.agents!.list.filter((agent) => !!agent.default).map((agent) => agent.id)
-      : [];
-
     const workspace = (body.workspace || '').trim() || path.join(home, '.openclaw', `workspace-${agentId}`);
     const model = (body.model || '').trim();
     const bindings = (Array.isArray(body.bindings) ? body.bindings : []).map((item) => String(item).trim()).filter(Boolean);
@@ -406,8 +469,7 @@ export async function POST(req: Request) {
     if (fs.existsSync(configPath)) {
       const content = fs.readFileSync(configPath, 'utf8');
       const config = JSON.parse(content) as OpenClawConfig;
-      const targetIds = body.setDefault ? [agentId] : previousDefaultIds;
-      if (setDefaultAgentsInConfig(config, targetIds)) {
+      if (body.setDefault && setDefaultAgentsInConfig(config, [agentId])) {
         fs.writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf8');
       }
     }

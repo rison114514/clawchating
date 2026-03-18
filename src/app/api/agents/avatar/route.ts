@@ -69,10 +69,18 @@ export async function GET(req: Request) {
       return NextResponse.json({ error: 'avatar path escapes workspace root' }, { status: 400 });
     }
 
-    const fileBuffer = await fs.readFile(avatarPath);
+    const [realWorkspaceDir, realAvatarPath] = await Promise.all([
+      fs.realpath(workspaceDir),
+      fs.realpath(avatarPath),
+    ]);
+    if (realAvatarPath !== realWorkspaceDir && !realAvatarPath.startsWith(`${realWorkspaceDir}${path.sep}`)) {
+      return NextResponse.json({ error: 'avatar symlink escapes workspace root' }, { status: 400 });
+    }
+
+    const fileBuffer = await fs.readFile(realAvatarPath);
     return new Response(fileBuffer, {
       headers: {
-        'Content-Type': mimeFromPath(avatarPath),
+        'Content-Type': mimeFromPath(realAvatarPath),
         'Cache-Control': 'public, max-age=60',
       },
     });

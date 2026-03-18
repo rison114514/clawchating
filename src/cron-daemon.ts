@@ -1,13 +1,6 @@
 import fs from 'fs/promises';
 import path from 'path';
-import { createOpenAI } from '@ai-sdk/openai';
-import { generateText, tool } from 'ai';
-import { z } from 'zod';
-
-const openclaw = createOpenAI({
-  baseURL: 'http://127.0.0.1:18789/v1',
-  apiKey: process.env.OPENCLAW_API_KEY,
-});
+import { POST as runChatRoute } from './app/api/chat/route';
 
 let isRunning = false;
 
@@ -35,7 +28,11 @@ export function startCronDaemon() {
       const now = Date.now();
 
       for (const cron of crons) {
-        if (cron.active && now - cron.lastRun >= cron.intervalMin * 60000) {
+        const isActive = cron.active !== false;
+        const lastRun = typeof cron.lastRun === 'number' ? cron.lastRun : 0;
+        const intervalMs = Math.max(1, Number(cron.intervalMin) || 1) * 60000;
+
+        if (isActive && now - lastRun >= intervalMs) {
           changed = true;
           cron.lastRun = now;
           console.log(`[Cron Daemon] Triggering task ${cron.id} for agent ${cron.agentId}`);
@@ -54,69 +51,103 @@ export function startCronDaemon() {
   }, 30000);
 }
 
+type OpenClawAgent = {
+  id?: string;
+  name?: string;
+};
+
+type OpenClawConfig = {
+  agents?: {
+    list?: OpenClawAgent[];
+  };
+};
+
+type GroupRecord = {
+  id: string;
+  members?: string[];
+  channelId?: string;
+  ownerId?: string;
+  ownerName?: string;
+};
+
+async function loadGroups() {
+  const groupsPath = path.join(process.cwd(), 'workspaces', 'groups.json');
+  try {
+    const content = await fs.readFile(groupsPath, 'utf-8');
+    const rows = JSON.parse(content);
+    return Array.isArray(rows) ? (rows as GroupRecord[]) : [];
+  } catch {
+    return [] as GroupRecord[];
+  }
+}
+
 async function executeTask(cron: any) {
-  const workspaceFolderName = cron.groupId;
-  const workspaceDir = path.join(process.cwd(), 'workspaces', workspaceFolderName);
-  
-  await fs.mkdir(workspaceDir, { recursive: true });
+  const groupId = String(cron.groupId || '').trim();
+  const configuredAgentId = String(cron.agentId || '').trim();
+  const prompt = String(cron.prompt || '').trim();
+  if (!groupId || !prompt || !configuredAgentId) return;
 
-  const systemInstructions = `
-你是 OpenClaw 集群中的一个 AI Agent，当前身份是: ${cron.agentId}。
-你现在正在后台执行【定时任务】。
-当前所处的共享业务频道/群组是: ${cron.groupId}。
+  const groups = await loadGroups();
+  const group = groups.find((row) => row?.id === groupId);
+  const channelId = String(cron.channelId || group?.channelId || 'default').trim() || 'default';
+  const groupMembers = Array.isArray(group?.members)
+    ? group!.members!.map((m) => String(m || '').trim()).filter(Boolean)
+    : [];
 
-【工作区权限】
-你正在专门的后台运行时被赋予了本地工作夹：${workspaceFolderName} 的全权操作。
-你拥有读取文件、写入文件和执行命令的权限。
+  const resolvedAgentId = configuredAgentId;
 
-由于你是后台定时触发的，用户此时可能不在屏幕前。
-请将你的工作成果、总结或发现记录在内存文件 (memory.md) 或创建新的报告文件中，以便用户之后查看。
-`;
+  if (!groupMembers.includes(resolvedAgentId)) {
+    groupMembers.push(resolvedAgentId);
+  }
 
-  const agentTools = {
-    read_file: tool({
-      description: 'Read the contents of a file in your current workspace.',
-      parameters: z.object({ filename: z.string() }),
-      execute: async ({ filename }) => {
-        try { return await fs.readFile(path.join(workspaceDir, filename), 'utf8'); } 
-        catch (e: any) { return `Error: ${e.message}`; }
-      },
-    }),
-    write_file: tool({
-      description: 'Write or overwrite a file in your workspace.',
-      parameters: z.object({ filename: z.string(), content: z.string() }),
-      execute: async ({ filename, content }) => {
-        try {
-          const targetPath = path.join(workspaceDir, filename);
-          await fs.mkdir(path.dirname(targetPath), { recursive: true });
-          await fs.writeFile(targetPath, content, 'utf8');
-          return `Successfully wrote to ${filename}`;
-        } catch (e: any) { return `Error: ${e.message}`; }
-      },
-    }),
-    execute_command: tool({
-      description: 'Execute a bash/shell command in the workspace.',
-      parameters: z.object({ command: z.string() }),
-      execute: async ({ command }) => {
-        try {
-          const { exec } = await import('child_process');
-          const util = await import('util');
-          const { stdout, stderr } = await util.promisify(exec)(command, { cwd: workspaceDir, timeout: 30000 });
-          return (stdout ? `STDOUT:\n${stdout}\n` : '') + (stderr ? `STDERR:\n${stderr}\n` : '') || 'Command executed successfully.';
-        } catch (e: any) { return `Error Executing ${command}: ${e.message}`; }
-      },
-    })
+  const ownerUserId = String(group?.ownerId || '').trim() || 'ou_local_user';
+  const ownerName = String(group?.ownerName || '').trim() || 'Clawchating User';
+
+  const taskInput = [
+    `[CronTask] 系统定时呼唤。`,
+    `cronId=${String(cron.id || 'unknown')} groupId=${groupId} channelId=${channelId}`,
+    `@${resolvedAgentId} ${prompt}`,
+  ].join('\n');
+
+  const payload = {
+    inputText: taskInput,
+    agentId: resolvedAgentId,
+    channelId,
+    sessionType: 'group',
+    groupId,
+    groupMembers,
+    senderId: ownerUserId,
+    senderName: ownerName,
+    autoMentionName: undefined,
   };
 
-  const { text, steps } = await generateText({
-    model: openclaw(cron.agentId || 'main'),
-    messages: [{ role: 'user', content: `[定时任务执行]: ${cron.prompt}` }],
-    system: systemInstructions,
-    tools: agentTools,
-    maxSteps: 5,
+  console.info('[cron_dispatch_via_chat]', {
+    cronId: String(cron.id || ''),
+    configuredAgentId,
+    resolvedAgentId,
+    groupId,
+    channelId,
+    ownerUserId,
+    groupMembers,
   });
 
-  // Log the execution
-  const logEntry = `\n\n--- [${new Date().toISOString()}] 定时任务: ${cron.prompt} ---\nAgent (${cron.agentId}) 回复:\n${text}\n执行情况:\n${JSON.stringify(steps.map(s => s.toolCalls.map(t => t.toolName)), null, 2)}\n`;
+  const req = new Request('http://localhost/api/chat', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  const res = await runChatRoute(req);
+  const json = await res.json().catch(() => ({} as Record<string, unknown>));
+  if (!res.ok) {
+    throw new Error(`Cron dispatch via chat failed: ${String((json as any)?.error || res.statusText)}`);
+  }
+
+  const responseText = typeof (json as any)?.message?.content === 'string'
+    ? (json as any).message.content
+    : JSON.stringify(json, null, 2);
+
+  const workspaceDir = path.join(process.cwd(), 'workspaces', groupId);
+  const logEntry = `\n\n--- [${new Date().toISOString()}] 定时任务: ${prompt} ---\nAgent (${resolvedAgentId}) 回复:\n${responseText}\n`;
+  await fs.mkdir(workspaceDir, { recursive: true });
   await fs.appendFile(path.join(workspaceDir, 'cron-execution.log'), logEntry, 'utf8');
 }

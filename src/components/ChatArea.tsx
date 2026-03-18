@@ -1,6 +1,6 @@
 import { User, Send, Terminal, AtSign, FolderClosed, Plus, Clock, FileText, X } from 'lucide-react';
 import { cn } from '../lib/utils';
-import { Agent, Group, SessionType, CronTask } from '../lib/types';
+import { Agent, Group, SessionType, CronTask, WorkspaceEntry } from '../lib/types';
 import ReactMarkdown from 'react-markdown';
 import React from 'react';
 import { RightSidebar } from './Panels/RightSidebar';
@@ -22,7 +22,7 @@ interface ChatAreaProps {
   mentionedAgentId?: string;
   renderUserTextWithMentions: (content: string) => React.ReactNode;
   messagesEndRef: React.RefObject<HTMLDivElement | null>;
-  workspaceFiles: string[];
+  workspaceFiles: WorkspaceEntry[];
   openFile: (filename: string) => void;
   viewingFile: { name: string; content: string } | null;
   setViewingFile: (val: any) => void;
@@ -42,6 +42,13 @@ export function ChatArea({
   activeSession, agents, currentGroup, activeAgentInfo, activeChannelId, setConfigAgentId, fetchGroups, isWorkspaceOpen, setIsWorkspaceOpen, setIsCronModalOpen, crons, messages, isLoading, mentionedAgentId, renderUserTextWithMentions, messagesEndRef, workspaceFiles, openFile, viewingFile, setViewingFile, mentionMenu, insertMention, proxyHandleSubmit, textareaRef, input, handleInputTextChange, onAddAgent, onSetLeader, onRemoveAgent, onDeleteGroup
 }: ChatAreaProps) {
   const ActiveIcon = activeAgentInfo.icon;
+  const isLocalUserMessage = (message: any) => {
+    if (message.role !== 'user') return false;
+    if (activeSession.type !== 'group') return true;
+    const sender = (message?.name || '').trim();
+    if (!sender) return true;
+    return sender === 'Clawchating User' || sender === 'You';
+  };
 
   return (
     <div className="flex-1 flex flex-col h-full bg-neutral-900 relative z-10">
@@ -118,14 +125,34 @@ export function ChatArea({
           ) : (
             <>
               {messages.map(m => (
-                <div key={m.id} className={cn("flex flex-col gap-2 max-w-4xl mx-auto w-full", m.role === 'user' ? "items-end" : "items-start")}>
+                <div
+                  key={m.id}
+                  className={cn(
+                    "flex flex-col gap-2 max-w-4xl mx-auto w-full",
+                    m.role === 'user' && isLocalUserMessage(m) ? 'items-end' : 'items-start'
+                  )}
+                >
                   <div className="flex items-center gap-2 px-1">
-                    {m.role === 'user' ? (
+                    {m.role === 'user' && isLocalUserMessage(m) ? (
                       <>
                         <span className="text-xs font-medium text-neutral-500">You</span>
                         <div className="w-5 h-5 rounded flex items-center justify-center bg-indigo-600/20">
                           <User className="w-3.5 h-3.5 text-indigo-400" />
                         </div>
+                      </>
+                    ) : m.role === 'user' ? (
+                      <>
+                        <div className="w-5 h-5 rounded flex items-center justify-center bg-neutral-800 border border-neutral-700">
+                          {(() => {
+                            const senderName = String(m.name || '').trim();
+                            const senderAgent = agents.find(a => a.id === senderName || a.name === senderName);
+                            if (!senderAgent) {
+                              return <User className="w-3.5 h-3.5 text-neutral-400" />;
+                            }
+                            return <senderAgent.icon className={cn("w-3.5 h-3.5", senderAgent.color)} />;
+                          })()}
+                        </div>
+                        <span className="text-xs font-medium text-neutral-400">{m.name || '群成员'}</span>
                       </>
                     ) : (
                       <>
@@ -141,7 +168,7 @@ export function ChatArea({
 
                   <div className={cn(
                     "px-4 py-3 text-[15px] leading-relaxed max-w-full overflow-hidden",
-                    m.role === 'user' 
+                    m.role === 'user' && isLocalUserMessage(m)
                       ? "bg-indigo-600 text-white rounded-2xl rounded-tr-sm" 
                       : "bg-[#252525] text-neutral-200 rounded-2xl rounded-tl-sm border border-neutral-800 shadow-sm"
                   )}>
@@ -192,7 +219,7 @@ export function ChatArea({
             agents={agents}
             onOpenWorkspace={() => setIsWorkspaceOpen(true)}
             onOpenCrons={() => setIsCronModalOpen(true)}
-            workspaceFileCount={workspaceFiles.length}
+            workspaceFileCount={workspaceFiles.filter((entry) => !entry.isDirectory).length}
             cronTaskCount={crons.filter(c => c.groupId === activeSession.id).length}
             onAddAgent={onAddAgent}
             onSetLeader={onSetLeader}

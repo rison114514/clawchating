@@ -2,7 +2,7 @@
 
 import { useState, useRef, useEffect } from 'react';
 import { Bot, Zap, Cpu, Code, PenTool, Image as ImageIcon, Terminal, Settings, Users } from 'lucide-react';
-import { Agent, Group, SessionType, CronTask } from '../lib/types';
+import { Agent, Group, SessionType, CronTask, WorkspaceEntry } from '../lib/types';
 import { Sidebar } from '../components/Sidebar';
 import { SettingsView } from '../components/SettingsView';
 import { CronTasksPanel } from '../components/Panels/CronTasksPanel';
@@ -37,6 +37,8 @@ export default function Chat() {
   const [isSavingConfig, setIsSavingConfig] = useState(false);
   const [savingCapabilityAgentId, setSavingCapabilityAgentId] = useState<string | null>(null);
   const [nativeSkills, setNativeSkills] = useState<Array<{ name: string; description?: string; source?: string }>>([]);
+  const [modelOptions, setModelOptions] = useState<Array<{ key: string; name?: string }>>([]);
+  const [isLoadingModelOptions, setIsLoadingModelOptions] = useState(false);
 
   const [crons, setCrons] = useState<CronTask[]>([]);
   const [isCronModalOpen, setIsCronModalOpen] = useState(false);
@@ -47,7 +49,7 @@ export default function Chat() {
   const [globalChannelId, setGlobalChannelId] = useState('default-workspace');
   
   const [isWorkspaceOpen, setIsWorkspaceOpen] = useState(false);
-  const [workspaceFiles, setWorkspaceFiles] = useState<string[]>([]);
+  const [workspaceFiles, setWorkspaceFiles] = useState<WorkspaceEntry[]>([]);
   const [viewingFile, setViewingFile] = useState<{name: string, content: string}|null>(null);
 
   const [messages, setMessages] = useState<any[]>([]);
@@ -94,13 +96,27 @@ export default function Chat() {
   
   const currentGroup = activeSession.type === 'group' ? groups.find(g => g.id === activeSession.id) : null;
   const activeChannelId = activeSession.type === 'group' ? (currentGroup?.channelId || 'default') : globalChannelId;
-  const workspaceFolderId = activeSession.type === 'group' ? currentGroup!.id : activeChannelId;
+  const workspaceFolderId = activeSession.type === 'group' ? activeSession.id : activeChannelId;
 
   const fetchWorkspaceFiles = async () => {
     try {
       const res = await fetch(`/api/workspace/files?scopedId=${workspaceFolderId}`);
       const data = await res.json();
-      if (data.files) setWorkspaceFiles(data.files);
+      if (Array.isArray(data.files)) {
+        const normalized: WorkspaceEntry[] = data.files
+          .map((entry: any) => {
+            if (typeof entry === 'string') {
+              return { name: entry, isDirectory: false, path: entry };
+            }
+            return {
+              name: String(entry?.name || ''),
+              isDirectory: !!entry?.isDirectory,
+              path: String(entry?.path || entry?.name || ''),
+            };
+          })
+          .filter((entry: WorkspaceEntry) => !!entry.name && !!entry.path);
+        setWorkspaceFiles(normalized);
+      }
     } catch (e) {
       console.error(e);
     }
@@ -134,27 +150,49 @@ export default function Chat() {
     return 'ou_local_user';
   };
 
-  const buildSessionKeyForAgent = (agentId: string) => `agent:${agentId}:clawchating:direct:${resolveUiPeerId()}`;
+  const sanitizeSessionPeer = (value: string) => value.replace(/[^a-zA-Z0-9_-]/g, '_');
+
+  const resolveScopedPeerId = () => {
+    const basePeer = resolveUiPeerId();
+    if (activeSession.type === 'group') {
+      return sanitizeSessionPeer(`grp_${activeSession.id}__ch_${activeChannelId || 'default'}__${basePeer}`);
+    }
+    return sanitizeSessionPeer(basePeer);
+  };
+
+  const buildSessionKeyForAgent = (agentId: string) => `agent:${agentId}:clawchating:direct:${resolveScopedPeerId()}`;
 
   const loadAgentId = activeSession.type === 'group' ? resolveGroupDefaultAgentId() : activeSession.id;
   const sessionIdentifier = buildSessionKeyForAgent(loadAgentId);
 
+  const normalizeLoadedMessages = (data: any[]) => {
+    return data.map((m: any, index: number) => ({
+      id: m.id || `${Date.now()}-${index}`,
+      role: m.role,
+      content: typeof m.content === 'string' ? m.content : '',
+      name: typeof m.name === 'string' ? m.name : undefined,
+      meta: m?.meta,
+    }));
+  };
+
+  const loadCurrentMessages = async () => {
+    if (activeSession.type === 'group') {
+      const res = await fetch(`/api/messages?groupId=${encodeURIComponent(activeSession.id)}&channelId=${encodeURIComponent(activeChannelId)}`);
+      const data = await res.json();
+      const loaded = Array.isArray(data) ? normalizeLoadedMessages(data) : [];
+      setMessages(loaded);
+      return;
+    }
+
+    const res = await fetch(`/api/messages?agentId=${loadAgentId}&sessionKey=${encodeURIComponent(sessionIdentifier)}`);
+    const data = await res.json();
+    const loaded = Array.isArray(data) ? normalizeLoadedMessages(data) : [];
+    setMessages(loaded);
+  };
+
   useEffect(() => {
-    fetch(`/api/messages?agentId=${loadAgentId}&sessionKey=${encodeURIComponent(sessionIdentifier)}`)
-      .then(res => res.json())
-      .then(data => {
-        const loaded = Array.isArray(data)
-          ? data.map((m: any, index: number) => ({
-              id: m.id || `${Date.now()}-${index}`,
-              role: m.role,
-              content: typeof m.content === 'string' ? m.content : '',
-              name: m.name,
-            }))
-          : [];
-        setMessages(loaded);
-      })
-      .catch(console.error);
-  }, [sessionIdentifier, loadAgentId]);
+    loadCurrentMessages().catch(console.error);
+  }, [activeSession.type, activeSession.id, activeChannelId, sessionIdentifier, loadAgentId]);
 
   const currentMentionedAgentId = resolveMentionedAgentId(input);
 
@@ -207,15 +245,19 @@ export default function Chat() {
         throw new Error(data?.error || 'Chat request failed');
       }
 
-      setMessages((current) => [
-        ...current,
-        {
-          id: data?.message?.id || `${Date.now()}-assistant`,
-          role: 'assistant',
-          content: data?.message?.content || '系统未返回有效回复。',
-          name: data?.message?.name || targetAgentIdForSubmit,
-        },
-      ]);
+      if (activeSession.type === 'group') {
+        await loadCurrentMessages();
+      } else {
+        setMessages((current) => [
+          ...current,
+          {
+            id: data?.message?.id || `${Date.now()}-assistant`,
+            role: 'assistant',
+            content: data?.message?.content || '系统未返回有效回复。',
+            name: data?.message?.name || targetAgentIdForSubmit,
+          },
+        ]);
+      }
     } catch (error) {
       console.error(error);
       setMessages((current) => [
@@ -281,8 +323,33 @@ export default function Chat() {
     }
   };
 
+  const fetchModelOptions = async () => {
+    setIsLoadingModelOptions(true);
+    try {
+      const res = await fetch('/api/agents?resource=models');
+      const data = await res.json();
+      if (Array.isArray(data?.models)) {
+        const normalized = data.models
+          .map((model: any) => ({
+            key: String(model?.key || ''),
+            name: typeof model?.name === 'string' ? model.name : undefined,
+          }))
+          .filter((model: { key: string; name?: string }) => !!model.key);
+        setModelOptions(normalized);
+      } else {
+        setModelOptions([]);
+      }
+    } catch (e) {
+      console.error(e);
+      setModelOptions([]);
+    } finally {
+      setIsLoadingModelOptions(false);
+    }
+  };
+
   useEffect(() => {
     fetchAgents();
+    fetchModelOptions();
 
     fetch('/api/skills?eligible=true')
       .then(res => res.json())
@@ -667,6 +734,8 @@ export default function Chat() {
       <Sidebar 
         agents={agents}
         groups={groups}
+        modelOptions={modelOptions}
+        isLoadingModelOptions={isLoadingModelOptions}
         activeSession={activeSession}
         setActiveSession={setActiveSession}
         globalChannelId={globalChannelId}
