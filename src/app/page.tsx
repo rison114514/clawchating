@@ -22,6 +22,33 @@ type AgentCapabilities = {
   skills: boolean;
 };
 
+type OpenClawModelConfig = {
+  configPath: string;
+  defaultModel: string;
+  imageModel: string | null;
+  fallbacks: string[];
+  imageFallbacks: string[];
+  allowed: string[];
+  authProviders: Array<{ provider: string; effectiveKind: string; effectiveDetail: string }>;
+};
+
+type OpenClawModelItem = {
+  key: string;
+  name?: string;
+  input?: string;
+  contextWindow?: number;
+  available?: boolean;
+  local?: boolean;
+  tags?: string[];
+};
+
+type OpenClawProviderOption = {
+  value: string;
+  label: string;
+  hint?: string;
+  choices: string[];
+};
+
 const DEFAULT_CAPABILITIES: AgentCapabilities = { read: true, write: true, exec: false, invite: false, skills: true };
 
 export default function Chat() {
@@ -31,7 +58,7 @@ export default function Chat() {
   
   const [isCreatingGroup, setIsCreatingGroup] = useState(false);
   const [configAgentId, setConfigAgentId] = useState<string | null>(null);
-  const [configTab, setConfigTab] = useState<'capabilities' | 'files'>('capabilities');
+  const [configTab, setConfigTab] = useState<'capabilities' | 'files' | 'models'>('capabilities');
   const [activeConfigFileName, setActiveConfigFileName] = useState<string | null>(null);
   const [basicConfigContent, setBasicConfigContent] = useState<string>('');
   const [isSavingConfig, setIsSavingConfig] = useState(false);
@@ -39,6 +66,11 @@ export default function Chat() {
   const [nativeSkills, setNativeSkills] = useState<Array<{ name: string; description?: string; source?: string }>>([]);
   const [modelOptions, setModelOptions] = useState<Array<{ key: string; name?: string }>>([]);
   const [isLoadingModelOptions, setIsLoadingModelOptions] = useState(false);
+  const [openClawModelConfig, setOpenClawModelConfig] = useState<OpenClawModelConfig | null>(null);
+  const [openClawModels, setOpenClawModels] = useState<OpenClawModelItem[]>([]);
+  const [openClawProviders, setOpenClawProviders] = useState<OpenClawProviderOption[]>([]);
+  const [isLoadingOpenClawModelConfig, setIsLoadingOpenClawModelConfig] = useState(false);
+  const [isSavingOpenClawModelConfig, setIsSavingOpenClawModelConfig] = useState(false);
 
   const [crons, setCrons] = useState<CronTask[]>([]);
   const [isCronModalOpen, setIsCronModalOpen] = useState(false);
@@ -347,9 +379,123 @@ export default function Chat() {
     }
   };
 
+  const fetchOpenClawModelConfig = async () => {
+    setIsLoadingOpenClawModelConfig(true);
+    try {
+      const res = await fetch('/api/models/config');
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data?.error || '加载模型配置失败');
+      }
+
+      const status = data?.status;
+      const models = Array.isArray(data?.models) ? data.models : [];
+      const providers = Array.isArray(data?.providers)
+        ? data.providers
+            .map((item: any) => ({
+              value: String(item?.value || ''),
+              label: String(item?.label || ''),
+              hint: typeof item?.hint === 'string' ? item.hint : undefined,
+              choices: Array.isArray(item?.choices) ? item.choices.map((choice: unknown) => String(choice)) : [],
+            }))
+            .filter((item: { value: string; label: string }) => item.value && item.label)
+        : [];
+
+      setOpenClawModelConfig({
+        configPath: String(status?.configPath || ''),
+        defaultModel: String(status?.defaultModel || ''),
+        imageModel: typeof status?.imageModel === 'string' ? status.imageModel : null,
+        fallbacks: Array.isArray(status?.fallbacks) ? status.fallbacks.map((item: unknown) => String(item)) : [],
+        imageFallbacks: Array.isArray(status?.imageFallbacks) ? status.imageFallbacks.map((item: unknown) => String(item)) : [],
+        allowed: Array.isArray(status?.allowed) ? status.allowed.map((item: unknown) => String(item)) : [],
+        authProviders: Array.isArray(status?.authProviders)
+          ? status.authProviders.map((provider: any) => ({
+              provider: String(provider?.provider || ''),
+              effectiveKind: String(provider?.effectiveKind || ''),
+              effectiveDetail: String(provider?.effectiveDetail || ''),
+            })).filter((provider: { provider: string }) => provider.provider)
+          : [],
+      });
+
+      setOpenClawModels(
+        models
+          .map((item: any) => ({
+            key: String(item?.key || ''),
+            name: typeof item?.name === 'string' ? item.name : undefined,
+            input: typeof item?.input === 'string' ? item.input : undefined,
+            contextWindow: typeof item?.contextWindow === 'number' ? item.contextWindow : undefined,
+            available: typeof item?.available === 'boolean' ? item.available : undefined,
+            local: typeof item?.local === 'boolean' ? item.local : undefined,
+            tags: Array.isArray(item?.tags) ? item.tags.map((tag: unknown) => String(tag)) : [],
+          }))
+          .filter((item: OpenClawModelItem) => item.key)
+      );
+      setOpenClawProviders(providers);
+    } catch (e) {
+      console.error(e);
+      alert(e instanceof Error ? e.message : String(e));
+    } finally {
+      setIsLoadingOpenClawModelConfig(false);
+    }
+  };
+
+  const saveOpenClawModelConfig = async (payload: {
+    defaultModel: string;
+    imageModel: string | null;
+    fallbacks: string[];
+    imageFallbacks: string[];
+    allowed: string[];
+  }) => {
+    setIsSavingOpenClawModelConfig(true);
+    try {
+      const res = await fetch('/api/models/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data?.error || '保存模型配置失败');
+      }
+
+      await fetchOpenClawModelConfig();
+    } finally {
+      setIsSavingOpenClawModelConfig(false);
+    }
+  };
+
+  const saveOpenClawProviderAuth = async (payload: {
+    provider: string;
+    apiKey: string;
+    profileId?: string;
+  }) => {
+    setIsSavingOpenClawModelConfig(true);
+    try {
+      const res = await fetch('/api/models/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          mode: 'save-auth',
+          provider: payload.provider,
+          apiKey: payload.apiKey,
+          profileId: payload.profileId,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data?.error || '保存供应商鉴权失败');
+      }
+
+      await fetchOpenClawModelConfig();
+    } finally {
+      setIsSavingOpenClawModelConfig(false);
+    }
+  };
+
   useEffect(() => {
     fetchAgents();
     fetchModelOptions();
+    fetchOpenClawModelConfig();
 
     fetch('/api/skills?eligible=true')
       .then(res => res.json())
@@ -702,6 +848,14 @@ export default function Chat() {
     }
   };
 
+  const openModelConfig = () => {
+    const preferredAgentId = activeSession.type === 'agent'
+      ? activeSession.id
+      : (resolveGroupDefaultAgentId() || agents[0]?.id || 'main');
+    setConfigTab('models');
+    setConfigAgentId(preferredAgentId);
+  };
+
   return (
     <div className="flex h-screen bg-neutral-900 text-neutral-100 overflow-hidden font-sans relative">
       <CronTasksPanel 
@@ -742,6 +896,7 @@ export default function Chat() {
         setGlobalChannelId={setGlobalChannelId}
         setIsCreatingGroup={setIsCreatingGroup}
         setConfigAgentId={setConfigAgentId}
+        openModelConfig={openModelConfig}
         createAgent={createAgent}
         deleteAgent={deleteAgent}
         setDefaultAgent={setDefaultAgent}
@@ -755,6 +910,14 @@ export default function Chat() {
           setConfigAgentId={setConfigAgentId}
           configTab={configTab}
           setConfigTab={setConfigTab}
+          openClawModelConfig={openClawModelConfig}
+          openClawModels={openClawModels}
+          openClawProviders={openClawProviders}
+          isLoadingOpenClawModelConfig={isLoadingOpenClawModelConfig}
+          isSavingOpenClawModelConfig={isSavingOpenClawModelConfig}
+          refreshOpenClawModelConfig={fetchOpenClawModelConfig}
+          saveOpenClawModelConfig={saveOpenClawModelConfig}
+          saveOpenClawProviderAuth={saveOpenClawProviderAuth}
           activeConfigFileName={activeConfigFileName}
           basicConfigContent={basicConfigContent}
           setBasicConfigContent={setBasicConfigContent}

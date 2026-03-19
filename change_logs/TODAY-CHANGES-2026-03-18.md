@@ -70,6 +70,17 @@
 ### 验证
 - 执行 `npm run build` 通过。
 
+### 模型配置保存报错修复
+- 问题：保存模型配置时调用 `openclaw config set --strict-json agents.defaults.model.imageFallbacks []` 触发 schema 校验失败（`agents.defaults.model: Invalid input`）。
+- 原因：`agents.defaults.model` 在当前 OpenClaw schema 下不接受 `imageFallbacks` 等字段直接写入。
+- 修复：`src/app/api/models/config/route.ts` 改为使用 OpenClaw 官方模型命令写入：
+	- `openclaw models set <model>`
+	- `openclaw models fallbacks clear/add`
+	- `openclaw models image-fallbacks clear/add`
+	- `openclaw models set-image <model>`（仅在有值时）
+	- `agents.defaults.models` 仍通过 `openclaw config set --strict-json` 写入白名单映射。
+- 结果：避免模型 schema 冲突，前端保存流程可正常完成。
+
 ### 会话对齐修正（针对群主会话键）
 - 修复 `src/cron-daemon.ts`：定时任务不再使用 `cron_task` 伪 peer，而是复用群组 owner peer（如 `ou_local_user`），与群主会话键保持一致。
 - 目标 Agent 选择策略调整：优先 `cron.agentId`（且必须在群成员中），否则回退 `leaderId`/首成员，避免错误落到 `main`。
@@ -98,3 +109,47 @@
 	- `@` 解析与 relay 协作
 	- 能力与提示词约束
 - 新增日志 `cron_dispatch_via_chat`，用于确认 cron 触发时传给 chat 路由的 agent/group/channel 参数。
+
+## OpenClaw 模型配置页面（前后端打通）
+
+### 目标
+- 在前端直接展示 OpenClaw 模型配置状态。
+- 支持用户选择默认模型、图像模型、文本回退、图像回退与允许模型白名单。
+- 将用户输入通过后端桥接到 OpenClaw CLI，使用 `openclaw config` 写入配置。
+
+### 核心改动
+- `src/app/api/models/config/route.ts`（新增）
+	- GET：调用 `openclaw models status --json` 与 `openclaw models list --json`，返回模型状态与可选列表。
+	- POST：调用 `openclaw config set --strict-json` 写入以下路径：
+		- `agents.defaults.model.primary`
+		- `agents.defaults.model.fallbacks`
+		- `agents.defaults.model.image`
+		- `agents.defaults.model.imageFallbacks`
+		- `agents.defaults.models`
+
+- `src/components/SettingsView.tsx`
+	- 新增「大模型配置」Tab。
+	- 新增 UI：
+		- 供应商选择 + API Key 粘贴（对应 OpenClaw 向导中的 Model/Auth Provider + Paste API Key）
+		- 默认模型选择、图像模型选择
+		- 回退列表编辑、允许模型勾选
+		- 鉴权状态只读展示
+	- 支持刷新配置与保存配置。
+
+- `src/components/Sidebar.tsx`
+	- 左下角新增醒目按钮「大模型配置」，可直接打开模型配置页面。
+
+- `src/app/page.tsx`
+	- 新增 `openModelConfig` 入口联动：点击左下角按钮后直接打开设置中心的模型配置 Tab。
+	- 新增供应商列表与鉴权保存动作透传。
+
+- `src/app/api/models/config/route.ts`
+	- GET 增加 `providers` 输出（从可用模型 key 前缀推导）。
+	- POST 增加 `mode=save-auth`：调用 `openclaw models auth paste-token` 完成 provider API key 写入。
+
+- `src/app/page.tsx`
+	- 新增模型配置状态加载与保存逻辑。
+	- 将模型配置数据与动作透传到 `SettingsView`。
+
+### 验证
+- 执行 `npm run build` 通过。

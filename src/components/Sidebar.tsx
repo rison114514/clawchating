@@ -1,4 +1,4 @@
-import { Bot, Hash, Users, Plus, Settings, Trash2, Star } from 'lucide-react';
+import { Bot, Hash, Users, Plus, Settings, Trash2, Star, Database } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { Agent, Group, SessionType } from '../lib/types';
 import { useState } from 'react';
@@ -16,6 +16,7 @@ interface SidebarProps {
   setGlobalChannelId: (id: string) => void;
   setIsCreatingGroup: (val: boolean) => void;
   setConfigAgentId: (id: string | null) => void;
+  openModelConfig: () => void;
   createAgent: (payload: {
     agentId: string;
     name?: string;
@@ -39,6 +40,7 @@ export function Sidebar({
   setGlobalChannelId,
   setIsCreatingGroup,
   setConfigAgentId,
+  openModelConfig,
   createAgent,
   deleteAgent,
   setDefaultAgent,
@@ -229,6 +231,17 @@ export function Sidebar({
             新增 Agent
           </button>
         </div>
+      </div>
+
+      <div className="p-3 border-t border-neutral-800 bg-neutral-950/80">
+        <button
+          onClick={openModelConfig}
+          className="w-full rounded-lg px-3 py-2.5 text-sm font-semibold bg-cyan-500/20 border border-cyan-500/40 text-cyan-200 hover:bg-cyan-500/30 hover:text-white transition-colors inline-flex items-center justify-center gap-2"
+          title="OpenClaw 大模型配置"
+        >
+          <Database className="w-4 h-4" />
+          大模型配置
+        </button>
       </div>
     </div>
   );

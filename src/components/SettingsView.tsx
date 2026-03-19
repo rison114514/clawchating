@@ -1,14 +1,61 @@
-import { Settings, X, Check, FolderClosed, Save, FileEdit } from 'lucide-react';
+import { Settings, X, Check, FolderClosed, Save, FileEdit, Database, RefreshCw } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { Agent } from '../lib/types';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { OpenClawTerminal } from './OpenClawTerminal';
+
+type OpenClawModelConfig = {
+  configPath: string;
+  defaultModel: string;
+  imageModel: string | null;
+  fallbacks: string[];
+  imageFallbacks: string[];
+  allowed: string[];
+  authProviders: Array<{ provider: string; effectiveKind: string; effectiveDetail: string }>;
+};
+
+type OpenClawModelItem = {
+  key: string;
+  name?: string;
+  input?: string;
+  contextWindow?: number;
+  available?: boolean;
+  local?: boolean;
+  tags?: string[];
+};
+
+type OpenClawProviderOption = {
+  value: string;
+  label: string;
+  hint?: string;
+  choices: string[];
+};
 
 interface SettingsViewProps {
   agents: Agent[];
   nativeSkills?: Array<{ name: string; description?: string; source?: string }>;
   configAgentId: string;
   setConfigAgentId: (id: string | null) => void;
-  configTab: 'capabilities' | 'files';
-  setConfigTab: (tab: 'capabilities' | 'files') => void;
+  configTab: 'capabilities' | 'files' | 'models';
+  setConfigTab: (tab: 'capabilities' | 'files' | 'models') => void;
+  openClawModelConfig: OpenClawModelConfig | null;
+  openClawModels: OpenClawModelItem[];
+  openClawProviders: OpenClawProviderOption[];
+  isLoadingOpenClawModelConfig: boolean;
+  isSavingOpenClawModelConfig: boolean;
+  refreshOpenClawModelConfig: () => Promise<void>;
+  saveOpenClawModelConfig: (payload: {
+    defaultModel: string;
+    imageModel: string | null;
+    fallbacks: string[];
+    imageFallbacks: string[];
+    allowed: string[];
+  }) => Promise<void>;
+  saveOpenClawProviderAuth: (payload: {
+    provider: string;
+    apiKey: string;
+    profileId?: string;
+  }) => Promise<void>;
   activeConfigFileName: string | null;
   basicConfigContent: string;
   setBasicConfigContent: (content: string) => void;
@@ -26,6 +73,14 @@ export function SettingsView({
   setConfigAgentId,
   configTab,
   setConfigTab,
+  openClawModelConfig,
+  openClawModels,
+  openClawProviders,
+  isLoadingOpenClawModelConfig,
+  isSavingOpenClawModelConfig,
+  refreshOpenClawModelConfig,
+  saveOpenClawModelConfig,
+  saveOpenClawProviderAuth,
   activeConfigFileName,
   basicConfigContent,
   setBasicConfigContent,
@@ -36,6 +91,229 @@ export function SettingsView({
   isUpdatingCapabilities = false,
 }: SettingsViewProps) {
   const agent = agents.find(a => a.id === configAgentId);
+  const [draftDefaultModel, setDraftDefaultModel] = useState('');
+  const [draftImageModel, setDraftImageModel] = useState('');
+  const [draftFallbacksText, setDraftFallbacksText] = useState('');
+  const [draftImageFallbacksText, setDraftImageFallbacksText] = useState('');
+  const [draftAllowedModels, setDraftAllowedModels] = useState<string[]>([]);
+  const [selectedProvider, setSelectedProvider] = useState('');
+  const [providerApiKey, setProviderApiKey] = useState('');
+  const [providerProfileId, setProviderProfileId] = useState('');
+  const [wizardSessionId, setWizardSessionId] = useState('');
+  const [wizardChunk, setWizardChunk] = useState('');
+  const [wizardHasOutput, setWizardHasOutput] = useState(false);
+  const [wizardOffset, setWizardOffset] = useState(0);
+  const [wizardExited, setWizardExited] = useState(false);
+  const [wizardExitCode, setWizardExitCode] = useState<number | null>(null);
+  const [wizardBusy, setWizardBusy] = useState(false);
+  const [wizardPollTick, setWizardPollTick] = useState(0);
+
+  useEffect(() => {
+    if (!openClawModelConfig) return;
+    setDraftDefaultModel(openClawModelConfig.defaultModel || '');
+    setDraftImageModel(openClawModelConfig.imageModel || '');
+    setDraftFallbacksText((openClawModelConfig.fallbacks || []).join('\n'));
+    setDraftImageFallbacksText((openClawModelConfig.imageFallbacks || []).join('\n'));
+    setDraftAllowedModels(openClawModelConfig.allowed || []);
+  }, [openClawModelConfig]);
+
+  useEffect(() => {
+    if (!openClawProviders.length) {
+      setSelectedProvider('');
+      return;
+    }
+    const providerValues = openClawProviders.map((item) => item.value);
+    setSelectedProvider((current) => (current && providerValues.includes(current) ? current : providerValues[0]));
+  }, [openClawProviders]);
+
+  const selectedProviderOption = useMemo(
+    () => openClawProviders.find((item) => item.value === selectedProvider),
+    [openClawProviders, selectedProvider]
+  );
+
+  const startOpenClawWizard = async () => {
+    setWizardBusy(true);
+    try {
+      if (wizardSessionId && !wizardExited) {
+        await stopOpenClawWizard();
+      }
+
+      const res = await fetch('/api/models/config/wizard', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'start', bootstrap: 'local-model' }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || '启动 openclaw config 失败');
+
+      setWizardSessionId(String(data?.sessionId || ''));
+      setWizardChunk('');
+      setWizardHasOutput(false);
+      setWizardOffset(0);
+      setWizardExited(false);
+      setWizardExitCode(null);
+      setWizardPollTick((tick) => tick + 1);
+    } catch (error) {
+      alert(error instanceof Error ? error.message : String(error));
+    } finally {
+      setWizardBusy(false);
+    }
+  };
+
+  const stopOpenClawWizard = async () => {
+    if (!wizardSessionId) return;
+    try {
+      await fetch('/api/models/config/wizard', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'stop', sessionId: wizardSessionId }),
+      });
+    } catch {
+      // ignore
+    }
+  };
+
+  const sendWizardInput = async (text: string) => {
+    if (!wizardSessionId || !text) return;
+    const res = await fetch('/api/models/config/wizard', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'input', sessionId: wizardSessionId, input: text }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data?.error || '发送输入失败');
+    }
+  };
+
+  const handleTerminalInput = useCallback((data: string) => {
+    sendWizardInput(data).catch((error) => {
+      console.error(error);
+    });
+  }, [wizardSessionId]);
+
+  useEffect(() => {
+    if (configTab !== 'models') return;
+    if (wizardSessionId) return;
+    startOpenClawWizard().catch(console.error);
+  }, [configTab]);
+
+  useEffect(() => {
+    if (!wizardSessionId || wizardExited) return;
+    let cancelled = false;
+
+    const poll = async () => {
+      try {
+        const res = await fetch(`/api/models/config/wizard?sessionId=${encodeURIComponent(wizardSessionId)}&since=${wizardOffset}&waitMs=15000`);
+        const data = await res.json();
+        if (cancelled) return;
+        if (!res.ok) {
+          throw new Error(data?.error || '拉取向导输出失败');
+        }
+        if (typeof data?.chunk === 'string' && data.chunk) {
+          setWizardChunk(data.chunk);
+          setWizardHasOutput(true);
+        } else {
+          setWizardChunk('');
+        }
+        if (typeof data?.nextOffset === 'number') {
+          setWizardOffset(data.nextOffset);
+        }
+        if (data?.exited) {
+          setWizardExited(true);
+          setWizardExitCode(typeof data?.exitCode === 'number' ? data.exitCode : null);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          console.error(error);
+          setTimeout(() => {
+            if (!cancelled) {
+              setWizardPollTick((tick) => tick + 1);
+            }
+          }, 1000);
+        }
+        return;
+      }
+
+      if (!cancelled && !wizardExited) {
+        setWizardPollTick((tick) => tick + 1);
+      }
+    };
+
+    poll().catch(console.error);
+
+    return () => {
+      cancelled = true;
+    };
+  }, [wizardSessionId, wizardOffset, wizardExited, wizardPollTick]);
+
+  useEffect(() => {
+    return () => {
+      if (!wizardSessionId) return;
+      fetch('/api/models/config/wizard', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'stop', sessionId: wizardSessionId }),
+      }).catch(() => undefined);
+    };
+  }, [wizardSessionId]);
+
+  const modelSelectOptions = useMemo(() => {
+    const dedup = new Map<string, OpenClawModelItem>();
+    for (const model of openClawModels) {
+      dedup.set(model.key, model);
+    }
+    return Array.from(dedup.values());
+  }, [openClawModels]);
+
+  const toggleAllowedModel = (modelKey: string) => {
+    setDraftAllowedModels((current) => {
+      if (current.includes(modelKey)) {
+        return current.filter((item) => item !== modelKey);
+      }
+      return [...current, modelKey];
+    });
+  };
+
+  const normalizeLines = (text: string) => {
+    return text
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+  };
+
+  const handleSaveModelConfig = async () => {
+    if (!draftDefaultModel.trim()) {
+      alert('默认模型不能为空。');
+      return;
+    }
+
+    await saveOpenClawModelConfig({
+      defaultModel: draftDefaultModel.trim(),
+      imageModel: draftImageModel.trim() || null,
+      fallbacks: normalizeLines(draftFallbacksText),
+      imageFallbacks: normalizeLines(draftImageFallbacksText),
+      allowed: Array.from(new Set(draftAllowedModels.map((item) => item.trim()).filter(Boolean))),
+    });
+  };
+
+  const handleSaveProviderAuth = async () => {
+    if (!selectedProvider.trim()) {
+      alert('请选择供应商。');
+      return;
+    }
+    if (!providerApiKey.trim()) {
+      alert('请输入 API Key。');
+      return;
+    }
+
+    await saveOpenClawProviderAuth({
+      provider: selectedProvider.trim(),
+      apiKey: providerApiKey.trim(),
+      profileId: providerProfileId.trim() || `${selectedProvider.trim()}:default`,
+    });
+    setProviderApiKey('');
+  };
 
   return (
     <div className="flex-1 flex flex-col h-full bg-neutral-900 relative z-10 shadow-2xl">
@@ -70,6 +348,12 @@ export function SettingsView({
             className={cn("px-4 py-1.5 rounded-md text-sm font-medium transition-colors", configTab === 'files' ? "bg-neutral-700 text-white shadow" : "text-neutral-400 hover:text-white")}
           >
             人设与配置
+          </button>
+          <button
+            onClick={() => setConfigTab('models')}
+            className={cn("px-4 py-1.5 rounded-md text-sm font-medium transition-colors", configTab === 'models' ? "bg-neutral-700 text-white shadow" : "text-neutral-400 hover:text-white")}
+          >
+            大模型配置
           </button>
         </div>
       </header>
@@ -139,7 +423,7 @@ export function SettingsView({
               )}
             </div>
           </div>
-        ) : (
+        ) : configTab === 'files' ? (
           <div className="flex-1 flex overflow-hidden">
             <div className="w-64 bg-neutral-950 border-r border-neutral-800 p-3 overflow-y-auto space-y-1.5 shrink-0 flex flex-col">
               <div className="text-xs font-semibold text-neutral-500/80 uppercase tracking-wider mb-3 px-3 pt-2">底层性格文件</div>
@@ -176,6 +460,254 @@ export function SettingsView({
                 spellCheck={false}
                 placeholder={activeConfigFileName ? `正在编辑 ${activeConfigFileName}... (如果空白说明仍未生成或文件为空)` : '请在左侧选择需要修改的配置文件...'}
               />
+            </div>
+          </div>
+        ) : (
+          <div className="p-8 max-w-5xl mx-auto w-full space-y-6 overflow-y-auto">
+            <div className="rounded-xl border border-cyan-600/40 bg-cyan-950/10 p-5 space-y-3">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <div className="text-sm font-semibold text-cyan-200">OpenClaw 向导命令行</div>
+                  <div className="text-xs text-cyan-100/70 mt-1">
+                    点击大模型配置后会自动执行 openclaw config，并尝试自动选择 Local + Model，后续由你继续操作。
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => startOpenClawWizard()}
+                    disabled={wizardBusy}
+                    className="px-3 py-1.5 rounded-lg border border-cyan-400/40 text-xs text-cyan-200 hover:bg-cyan-500/10 disabled:opacity-60"
+                  >
+                    重新启动向导
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => stopOpenClawWizard()}
+                    disabled={!wizardSessionId || wizardExited}
+                    className="px-3 py-1.5 rounded-lg border border-neutral-700 text-xs text-neutral-300 hover:bg-neutral-800 disabled:opacity-60"
+                  >
+                    停止
+                  </button>
+                </div>
+              </div>
+
+              <div className="rounded-lg border border-neutral-800 bg-neutral-950/80 p-3">
+                <OpenClawTerminal
+                  chunk={wizardChunk}
+                  sessionId={wizardSessionId}
+                  onInput={handleTerminalInput}
+                  disabled={!wizardSessionId || wizardExited}
+                  className="h-72 w-full"
+                />
+              </div>
+
+              {!wizardHasOutput ? (
+                <div className="text-xs text-neutral-500">等待 openclaw config 输出...</div>
+              ) : null}
+
+              <div className="text-xs text-neutral-500">
+                在终端区域内点击后可直接使用键盘操作（上下选择、空格勾选、回车确认、Ctrl+C 终止）。
+              </div>
+
+              <div className="text-xs text-neutral-500">
+                会话状态：{wizardSessionId ? '运行中' : '未启动'}{wizardExited ? `（已退出，code=${wizardExitCode ?? 'n/a'}）` : ''}
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-neutral-800 bg-neutral-900/50 p-5">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h4 className="text-lg font-semibold text-neutral-200 flex items-center gap-2">
+                    <Database className="w-5 h-5 text-cyan-400" /> OpenClaw 模型配置
+                  </h4>
+                  <p className="text-sm text-neutral-500 mt-1">该页面直接映射 OpenClaw `models status` 和 `config set` 配置路径。</p>
+                  <p className="text-xs text-neutral-600 mt-1 font-mono">{openClawModelConfig?.configPath || '配置路径加载中...'}</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => refreshOpenClawModelConfig()}
+                  disabled={isLoadingOpenClawModelConfig || isSavingOpenClawModelConfig}
+                  className="px-3 py-2 rounded-lg border border-neutral-700 text-sm text-neutral-300 hover:bg-neutral-800 disabled:opacity-60 inline-flex items-center gap-2"
+                >
+                  <RefreshCw className={cn('w-4 h-4', isLoadingOpenClawModelConfig ? 'animate-spin' : '')} />
+                  刷新
+                </button>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              <div className="rounded-xl border border-neutral-800 bg-neutral-900/50 p-5 space-y-4">
+                <div className="text-sm font-semibold text-neutral-200">供应商与 API 鉴权初始化</div>
+                <p className="text-xs text-neutral-500">对应 OpenClaw 配置向导中的 Model/Auth Provider + Paste API Key 过程。</p>
+
+                <div>
+                  <label className="block text-sm text-neutral-300 mb-1.5">模型供应商</label>
+                  <select
+                    value={selectedProvider}
+                    onChange={(e) => setSelectedProvider(e.target.value)}
+                    className="w-full rounded-lg bg-neutral-950 border border-neutral-800 px-3 py-2 text-sm text-neutral-200 focus:outline-none focus:border-cyan-500/60"
+                    disabled={isLoadingOpenClawModelConfig || isSavingOpenClawModelConfig}
+                  >
+                    <option value="">请选择供应商</option>
+                    {openClawProviders.map((provider) => (
+                      <option key={provider.value} value={provider.value}>{provider.label}</option>
+                    ))}
+                  </select>
+                  {selectedProviderOption?.hint ? (
+                    <div className="text-xs text-neutral-500 mt-1">{selectedProviderOption.hint}</div>
+                  ) : null}
+                </div>
+
+                <div>
+                  <label className="block text-sm text-neutral-300 mb-1.5">Profile ID（可选）</label>
+                  <input
+                    value={providerProfileId}
+                    onChange={(e) => setProviderProfileId(e.target.value)}
+                    placeholder={selectedProvider ? `${selectedProvider}:default` : 'provider:default'}
+                    className="w-full rounded-lg bg-neutral-950 border border-neutral-800 px-3 py-2 text-sm text-neutral-200 focus:outline-none focus:border-cyan-500/60"
+                    disabled={isLoadingOpenClawModelConfig || isSavingOpenClawModelConfig}
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm text-neutral-300 mb-1.5">API Key 粘贴</label>
+                  <input
+                    type="password"
+                    value={providerApiKey}
+                    onChange={(e) => setProviderApiKey(e.target.value)}
+                    placeholder="输入后将写入 OpenClaw auth profiles"
+                    className="w-full rounded-lg bg-neutral-950 border border-neutral-800 px-3 py-2 text-sm text-neutral-200 focus:outline-none focus:border-cyan-500/60"
+                    disabled={isLoadingOpenClawModelConfig || isSavingOpenClawModelConfig}
+                  />
+                </div>
+
+                <div className="flex justify-end">
+                  <button
+                    type="button"
+                    onClick={() => handleSaveProviderAuth()}
+                    disabled={isLoadingOpenClawModelConfig || isSavingOpenClawModelConfig}
+                    className="px-3 py-2 rounded-lg border border-cyan-500/40 text-cyan-300 hover:bg-cyan-500/10 disabled:opacity-60 text-sm"
+                  >
+                    写入供应商 API Key
+                  </button>
+                </div>
+              </div>
+
+              <div className="rounded-xl border border-neutral-800 bg-neutral-900/50 p-5 space-y-4">
+                <div>
+                  <label className="block text-sm text-neutral-300 mb-1.5">默认模型（primary）</label>
+                  <select
+                    value={draftDefaultModel}
+                    onChange={(e) => setDraftDefaultModel(e.target.value)}
+                    className="w-full rounded-lg bg-neutral-950 border border-neutral-800 px-3 py-2 text-sm text-neutral-200 focus:outline-none focus:border-cyan-500/60"
+                    disabled={isLoadingOpenClawModelConfig || isSavingOpenClawModelConfig}
+                  >
+                    <option value="">请选择默认模型</option>
+                    {modelSelectOptions.map((item) => (
+                      <option key={item.key} value={item.key}>
+                        {item.name ? `${item.name} (${item.key})` : item.key}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-sm text-neutral-300 mb-1.5">图像模型（image，可选）</label>
+                  <select
+                    value={draftImageModel}
+                    onChange={(e) => setDraftImageModel(e.target.value)}
+                    className="w-full rounded-lg bg-neutral-950 border border-neutral-800 px-3 py-2 text-sm text-neutral-200 focus:outline-none focus:border-cyan-500/60"
+                    disabled={isLoadingOpenClawModelConfig || isSavingOpenClawModelConfig}
+                  >
+                    <option value="">不指定图像模型</option>
+                    {modelSelectOptions.map((item) => (
+                      <option key={item.key} value={item.key}>
+                        {item.name ? `${item.name} (${item.key})` : item.key}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <div className="rounded-xl border border-neutral-800 bg-neutral-900/50 p-5">
+                <label className="block text-sm text-neutral-300 mb-2">允许模型列表（agents.defaults.models）</label>
+                <div className="max-h-64 overflow-y-auto space-y-2 pr-1">
+                  {modelSelectOptions.map((item) => {
+                    const checked = draftAllowedModels.includes(item.key);
+                    return (
+                      <label key={item.key} className="flex items-start gap-3 rounded-lg border border-neutral-800 bg-neutral-950/70 px-3 py-2 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={() => toggleAllowedModel(item.key)}
+                          disabled={isLoadingOpenClawModelConfig || isSavingOpenClawModelConfig}
+                          className="mt-0.5"
+                        />
+                        <div>
+                          <div className="text-sm text-neutral-200">{item.name || item.key}</div>
+                          <div className="text-xs text-neutral-500 font-mono">{item.key}</div>
+                        </div>
+                      </label>
+                    );
+                  })}
+                  {modelSelectOptions.length === 0 ? (
+                    <div className="text-sm text-neutral-500">暂无可用模型列表。</div>
+                  ) : null}
+                </div>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              <div className="rounded-xl border border-neutral-800 bg-neutral-900/50 p-5 space-y-2">
+                <label className="block text-sm text-neutral-300">文本回退模型（每行一个）</label>
+                <textarea
+                  value={draftFallbacksText}
+                  onChange={(e) => setDraftFallbacksText(e.target.value)}
+                  className="w-full h-36 rounded-lg bg-neutral-950 border border-neutral-800 px-3 py-2 text-sm text-neutral-200 focus:outline-none focus:border-cyan-500/60 resize-none"
+                  placeholder="例如:\nsglang/Qwen3.5-27B-FP8\nzai/glm-4.6v"
+                  disabled={isLoadingOpenClawModelConfig || isSavingOpenClawModelConfig}
+                />
+              </div>
+
+              <div className="rounded-xl border border-neutral-800 bg-neutral-900/50 p-5 space-y-2">
+                <label className="block text-sm text-neutral-300">图像回退模型（每行一个）</label>
+                <textarea
+                  value={draftImageFallbacksText}
+                  onChange={(e) => setDraftImageFallbacksText(e.target.value)}
+                  className="w-full h-36 rounded-lg bg-neutral-950 border border-neutral-800 px-3 py-2 text-sm text-neutral-200 focus:outline-none focus:border-cyan-500/60 resize-none"
+                  placeholder="例如:\nprovider/image-model-a"
+                  disabled={isLoadingOpenClawModelConfig || isSavingOpenClawModelConfig}
+                />
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-neutral-800 bg-neutral-900/50 p-5">
+              <div className="text-sm font-semibold text-neutral-200 mb-2">Provider 鉴权状态（只读）</div>
+              {openClawModelConfig?.authProviders?.length ? (
+                <div className="space-y-2">
+                  {openClawModelConfig.authProviders.map((provider) => (
+                    <div key={provider.provider} className="rounded-lg border border-neutral-800 bg-neutral-950/60 px-3 py-2">
+                      <div className="text-sm text-neutral-200">{provider.provider}</div>
+                      <div className="text-xs text-neutral-500">{provider.effectiveKind || 'unknown'} · {provider.effectiveDetail || 'n/a'}</div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="text-sm text-neutral-500">暂无鉴权信息。</div>
+              )}
+            </div>
+
+            <div className="flex justify-end">
+              <button
+                type="button"
+                onClick={() => handleSaveModelConfig()}
+                disabled={isLoadingOpenClawModelConfig || isSavingOpenClawModelConfig}
+                className="px-4 py-2 rounded-lg bg-cyan-600 hover:bg-cyan-500 disabled:opacity-60 text-white text-sm font-medium inline-flex items-center gap-2"
+              >
+                <Save className="w-4 h-4" />
+                {isSavingOpenClawModelConfig ? '正在写入 OpenClaw 配置...' : '保存模型配置'}
+              </button>
             </div>
           </div>
         )}
