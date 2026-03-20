@@ -856,6 +856,14 @@ export default function Chat() {
     setConfigAgentId(preferredAgentId);
   };
 
+  const logout = async () => {
+    try {
+      await fetch('/api/auth/logout', { method: 'POST' });
+    } finally {
+      window.location.href = '/login';
+    }
+  };
+
   return (
     <div className="flex h-screen bg-neutral-900 text-neutral-100 overflow-hidden font-sans relative">
       <CronTasksPanel 
@@ -900,6 +908,7 @@ export default function Chat() {
         createAgent={createAgent}
         deleteAgent={deleteAgent}
         setDefaultAgent={setDefaultAgent}
+        logout={logout}
       />
 
       {configAgentId ? (

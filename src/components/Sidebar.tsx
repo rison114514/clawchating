@@ -27,6 +27,7 @@ interface SidebarProps {
   }) => Promise<void>;
   deleteAgent: (agentId: string) => Promise<void>;
   setDefaultAgent: (agentId: string) => Promise<void>;
+  logout: () => Promise<void>;
 }
 
 export function Sidebar({
@@ -44,6 +45,7 @@ export function Sidebar({
   createAgent,
   deleteAgent,
   setDefaultAgent,
+  logout,
 }: SidebarProps) {
   const [isCreatingAgent, setIsCreatingAgent] = useState(false);
   const [deletingAgent, setDeletingAgent] = useState<Agent | null>(null);
@@ -234,6 +236,13 @@ export function Sidebar({
       </div>
 
       <div className="p-3 border-t border-neutral-800 bg-neutral-950/80">
+        <button
+          onClick={() => logout()}
+          className="w-full rounded-lg px-3 py-2 text-xs font-medium bg-neutral-800 border border-neutral-700 text-neutral-300 hover:bg-neutral-700 hover:text-white transition-colors mb-2"
+          title="退出登录"
+        >
+          退出登录
+        </button>
         <button
           onClick={openModelConfig}
           className="w-full rounded-lg px-3 py-2.5 text-sm font-semibold bg-cyan-500/20 border border-cyan-500/40 text-cyan-200 hover:bg-cyan-500/30 hover:text-white transition-colors inline-flex items-center justify-center gap-2"
