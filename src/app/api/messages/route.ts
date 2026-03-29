@@ -6,14 +6,43 @@ import {
   resolvePeerId,
 } from '@/lib/session-runtime';
 
+const CHAT_TRACE_ENABLED = /^(1|true|yes)$/i.test(process.env.CLAWCHATING_CHAT_TRACE || '');
+
+function logTrace(traceId: string | null, event: string, payload: Record<string, unknown>) {
+  if (!CHAT_TRACE_ENABLED || !traceId) return;
+  console.info('[chat_trace]', {
+    traceId,
+    event,
+    ...payload,
+  });
+}
+
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url);
+  const traceId = (searchParams.get('traceId') || '').trim() || null;
   const groupId = (searchParams.get('groupId') || '').trim();
   const channelId = (searchParams.get('channelId') || '').trim() || 'default';
+  const limit = Math.max(1, Number(searchParams.get('limit') || '50'));
+  const offset = Math.max(0, Number(searchParams.get('offset') || '0'));
+
+  logTrace(traceId, 'messages_fetch_start', {
+    groupId,
+    channelId,
+    limit,
+    offset,
+    mode: groupId ? 'group' : 'direct',
+  });
 
   if (groupId) {
-    const messages = await loadGroupTimelineMessages({ groupId, channelId, limit: 200 });
-    return new Response(JSON.stringify(messages), {
+    const result = await loadGroupTimelineMessages({ groupId, channelId, limit, offset });
+    logTrace(traceId, 'messages_fetch_done', {
+      groupId,
+      channelId,
+      count: result.messages.length,
+      hasMore: result.hasMore,
+      total: result.total,
+    });
+    return new Response(JSON.stringify(result), {
       headers: { 'Content-Type': 'application/json' },
     });
   }
@@ -28,8 +57,15 @@ export async function GET(req: Request) {
     });
   }
 
-  const messages = await loadSessionMessages({ agentId, sessionKey, limit: 80 });
-  return new Response(JSON.stringify(messages), {
+  const result = await loadSessionMessages({ agentId, sessionKey, limit, offset });
+  logTrace(traceId, 'messages_fetch_done', {
+    agentId,
+    sessionKey,
+    count: result.messages.length,
+    hasMore: result.hasMore,
+    total: result.total,
+  });
+  return new Response(JSON.stringify(result), {
     headers: { 'Content-Type': 'application/json' },
   });
 }

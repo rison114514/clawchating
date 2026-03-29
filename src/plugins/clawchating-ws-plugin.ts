@@ -96,7 +96,7 @@ async function handleRequest(req: RpcRequest) {
         agentId: session.profile.agentId,
         displayName: session.profile.displayName,
         workspaceDir: session.profile.workspaceDir,
-        capabilities: session.profile.capabilities,
+        toolsAlsoAllow: session.profile.toolsAlsoAllow,
       },
     };
   }

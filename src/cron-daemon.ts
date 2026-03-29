@@ -4,6 +4,42 @@ import { POST as runChatRoute } from './app/api/chat/route';
 
 let isRunning = false;
 
+function shouldRunCron(cron: any, now: number): boolean {
+  const isActive = cron.active !== false;
+  if (!isActive) return false;
+
+  const lastRun = typeof cron.lastRun === 'number' ? cron.lastRun : 0;
+  const scheduleType = cron.scheduleType === 'daily' ? 'daily' : 'interval';
+
+  if (scheduleType === 'daily') {
+    const dailyTime = String(cron.dailyTime || '09:00');
+    const [h, m] = dailyTime.split(':');
+    const hour = Number(h);
+    const minute = Number(m);
+    if (
+      Number.isNaN(hour) ||
+      Number.isNaN(minute) ||
+      hour < 0 ||
+      hour > 23 ||
+      minute < 0 ||
+      minute > 59
+    ) {
+      return false;
+    }
+
+    const nowDate = new Date(now);
+    const todayAtTime = new Date(nowDate);
+    todayAtTime.setHours(hour, minute, 0, 0);
+    const todayTrigger = todayAtTime.getTime();
+
+    if (now < todayTrigger) return false;
+    return lastRun < todayTrigger;
+  }
+
+  const intervalMs = Math.max(1, Number(cron.intervalMin) || 5) * 60000;
+  return now - lastRun >= intervalMs;
+}
+
 export function startCronDaemon() {
   if (isRunning) return;
   isRunning = true;
@@ -28,11 +64,7 @@ export function startCronDaemon() {
       const now = Date.now();
 
       for (const cron of crons) {
-        const isActive = cron.active !== false;
-        const lastRun = typeof cron.lastRun === 'number' ? cron.lastRun : 0;
-        const intervalMs = Math.max(1, Number(cron.intervalMin) || 1) * 60000;
-
-        if (isActive && now - lastRun >= intervalMs) {
+        if (shouldRunCron(cron, now)) {
           changed = true;
           cron.lastRun = now;
           console.log(`[Cron Daemon] Triggering task ${cron.id} for agent ${cron.agentId}`);

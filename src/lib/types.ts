@@ -6,7 +6,7 @@ export type Agent = {
   avatarEmoji?: string;
   hasAvatarImage?: boolean;
   isDefault?: boolean;
-  capabilities: { read: boolean; write: boolean; exec: boolean; invite: boolean; skills: boolean };
+  toolsAlsoAllow: string[];
 };
 
 export type Group = {
@@ -28,7 +28,9 @@ export type CronTask = {
   id: string;
   groupId: string;
   agentId: string;
-  intervalMin: number;
+  scheduleType?: 'interval' | 'daily';
+  intervalMin?: number;
+  dailyTime?: string;
   prompt: string;
   lastRun?: number;
   active?: boolean;

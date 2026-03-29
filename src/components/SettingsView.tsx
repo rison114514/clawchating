@@ -31,6 +31,14 @@ type OpenClawProviderOption = {
   choices: string[];
 };
 
+type ToolCatalogItem = {
+  id: string;
+  label: string;
+  description: string;
+  sectionId: string;
+  source: 'core' | 'detected';
+};
+
 interface SettingsViewProps {
   agents: Agent[];
   nativeSkills?: Array<{ name: string; description?: string; source?: string }>;
@@ -62,8 +70,12 @@ interface SettingsViewProps {
   isSavingConfig: boolean;
   loadAgentConfigFile: (agentId: string, filename: string) => void;
   saveAgentConfigFile: (agentId: string) => void;
-  toggleAgentCapability: (agentId: string, cap: 'read'|'write'|'exec'|'invite'|'skills') => void;
-  isUpdatingCapabilities?: boolean;
+  availableTools: string[];
+  toolCatalog: ToolCatalogItem[];
+  toggleAgentTool: (agentId: string, toolName: string) => void;
+  setAllAgentTools: (agentId: string, enabled: boolean) => void;
+  setAgentToolsAllow: (agentId: string, tools: string[]) => Promise<void>;
+  isUpdatingTools?: boolean;
 }
 
 export function SettingsView({
@@ -87,8 +99,12 @@ export function SettingsView({
   isSavingConfig,
   loadAgentConfigFile,
   saveAgentConfigFile,
-  toggleAgentCapability,
-  isUpdatingCapabilities = false,
+  availableTools,
+  toolCatalog,
+  toggleAgentTool,
+  setAllAgentTools,
+  setAgentToolsAllow,
+  isUpdatingTools = false,
 }: SettingsViewProps) {
   const agent = agents.find(a => a.id === configAgentId);
   const [draftDefaultModel, setDraftDefaultModel] = useState('');
@@ -107,6 +123,79 @@ export function SettingsView({
   const [wizardExitCode, setWizardExitCode] = useState<number | null>(null);
   const [wizardBusy, setWizardBusy] = useState(false);
   const [wizardPollTick, setWizardPollTick] = useState(0);
+  const [customToolInput, setCustomToolInput] = useState('');
+  const [isRegisteringChannel, setIsRegisteringChannel] = useState(false);
+
+  const TOOL_SECTION_LABELS: Record<string, string> = {
+    fs: 'Files',
+    runtime: 'Runtime',
+    web: 'Web',
+    memory: 'Memory',
+    sessions: 'Sessions',
+    ui: 'UI',
+    messaging: 'Messaging',
+    automation: 'Automation',
+    nodes: 'Nodes',
+    agents: 'Agents',
+    media: 'Media',
+    custom: 'Custom',
+  };
+
+  const groupedToolCatalog = useMemo(() => {
+    const catalogMap = new Map<string, ToolCatalogItem>();
+    for (const item of toolCatalog) {
+      catalogMap.set(item.id, item);
+    }
+    for (const toolName of availableTools) {
+      if (!catalogMap.has(toolName)) {
+        catalogMap.set(toolName, {
+          id: toolName,
+          label: toolName,
+          description: 'Detected from current OpenClaw allowlist.',
+          sectionId: 'custom',
+          source: 'detected',
+        });
+      }
+    }
+
+    const sectionMap = new Map<string, ToolCatalogItem[]>();
+    for (const item of catalogMap.values()) {
+      const sectionId = item.sectionId || 'custom';
+      const list = sectionMap.get(sectionId) || [];
+      list.push(item);
+      sectionMap.set(sectionId, list);
+    }
+
+    const order = ['fs', 'runtime', 'web', 'memory', 'sessions', 'ui', 'messaging', 'automation', 'nodes', 'agents', 'media', 'custom'];
+    return order
+      .filter((sectionId) => sectionMap.has(sectionId))
+      .map((sectionId) => ({
+        sectionId,
+        sectionLabel: TOOL_SECTION_LABELS[sectionId] || sectionId,
+        items: (sectionMap.get(sectionId) || []).sort((a, b) => a.id.localeCompare(b.id)),
+      }));
+  }, [toolCatalog, availableTools]);
+
+  const applySectionTools = (sectionId: string, enabled: boolean) => {
+    const section = groupedToolCatalog.find((item) => item.sectionId === sectionId);
+    if (!section || !agent) return;
+    const current = new Set(agent.toolsAlsoAllow || []);
+    for (const tool of section.items) {
+      if (enabled) current.add(tool.id);
+      else current.delete(tool.id);
+    }
+    const nextList = Array.from(current);
+    setAgentToolsAllow(configAgentId, nextList).catch(console.error);
+  };
+
+  const addCustomTool = () => {
+    const toolName = customToolInput.trim();
+    if (!toolName) return;
+    const current = new Set(agent?.toolsAlsoAllow || []);
+    current.add(toolName);
+    setAgentToolsAllow(configAgentId, Array.from(current)).catch(console.error);
+    setCustomToolInput('');
+  };
 
   useEffect(() => {
     if (!openClawModelConfig) return;
@@ -315,6 +404,25 @@ export function SettingsView({
     setProviderApiKey('');
   };
 
+  const handleRegisterClawchatingChannel = async () => {
+    setIsRegisteringChannel(true);
+    try {
+      const res = await fetch('/api/channels/register', {
+        method: 'POST',
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data?.error || '注册 clawchating channel 失败');
+      }
+
+      alert('已完成 clawchating channel 注册，请重启 openclaw gateway 后再测试。');
+    } catch (error) {
+      alert(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsRegisteringChannel(false);
+    }
+  };
+
   return (
     <div className="flex-1 flex flex-col h-full bg-neutral-900 relative z-10 shadow-2xl">
       <header className="h-16 border-b border-neutral-800 bg-neutral-900/80 backdrop-blur flex items-center justify-between px-6 z-10 shrink-0">
@@ -369,41 +477,109 @@ export function SettingsView({
             </div>
 
             <div>
-              <h4 className="text-lg font-semibold text-neutral-200 mb-2 mt-4">工作区操作权限</h4>
-              <p className="text-sm text-neutral-400 mb-6">配置该 Agent 在系统中的本地文件读写与命令执行权限。</p>
-              {isUpdatingCapabilities && (
+              <h4 className="text-lg font-semibold text-neutral-200 mb-2 mt-4">原生 Tools 权限</h4>
+              <p className="text-sm text-neutral-400 mb-6">完全使用 OpenClaw 原生 tools.alsoAllow，按工具名称进行开关，不再使用读/写/执行等抽象能力层。</p>
+              {isUpdatingTools && (
                 <p className="text-xs text-indigo-400/90 mb-4">正在写入 .openclaw/openclaw.json...</p>
               )}
             </div>
+
+            <div className="flex items-center gap-3">
+              <button
+                type="button"
+                onClick={() => setAllAgentTools(configAgentId, true)}
+                disabled={isUpdatingTools}
+                className="px-3 py-1.5 rounded-lg border border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/10 disabled:opacity-60 text-xs"
+              >
+                一键全开
+              </button>
+              <button
+                type="button"
+                onClick={() => setAllAgentTools(configAgentId, false)}
+                disabled={isUpdatingTools}
+                className="px-3 py-1.5 rounded-lg border border-rose-500/40 text-rose-300 hover:bg-rose-500/10 disabled:opacity-60 text-xs"
+              >
+                一键全关
+              </button>
+              <span className="text-xs text-neutral-500">当前已启用 {agent?.toolsAlsoAllow?.length || 0} / {availableTools.length}</span>
+            </div>
+
+            <div className="rounded-xl border border-neutral-800 bg-neutral-900/40 p-4">
+              <div className="text-xs text-neutral-400 mb-2">添加自定义工具 ID（用于插件工具或尚未自动发现的工具）</div>
+              <div className="flex gap-2">
+                <input
+                  value={customToolInput}
+                  onChange={(e) => setCustomToolInput(e.target.value)}
+                  placeholder="例如: feishu_doc"
+                  className="flex-1 rounded-lg bg-neutral-950 border border-neutral-800 px-3 py-2 text-sm text-neutral-200 focus:outline-none focus:border-indigo-500/60"
+                  disabled={isUpdatingTools}
+                />
+                <button
+                  type="button"
+                  onClick={addCustomTool}
+                  disabled={isUpdatingTools || !customToolInput.trim()}
+                  className="px-3 py-2 rounded-lg border border-indigo-500/40 text-indigo-300 hover:bg-indigo-500/10 disabled:opacity-60 text-sm"
+                >
+                  添加并开启
+                </button>
+              </div>
+            </div>
             
-            <div className="space-y-4">
-              {[
-                { key: 'read', label: '文件目录读取 (Read)', desc: '允许读取所处工作区内所有的代码以及文档。关闭此功能此会使Agent无法记忆上下文工作内容。' },
-                { key: 'write', label: '文件内容写入 (Write)', desc: '允许在工作区中创建、更新、删除或覆写文件。通常需要搭配 Read 开启以正常工作。' },
-                { key: 'exec', label: '系统命令执行 (Exec)', desc: '高危: 允许执行终端底层命令 (例如 npm run build)。开启此功能时请确保底层在沙箱内，否则非常危险！' },
-                { key: 'invite', label: '拉取进群 (Invite)', desc: '允许 Agent 调用工具将其他已知 Agent 拉入群聊。默认关闭。' },
-                { key: 'skills', label: '原生技能通道 (Skills)', desc: '允许 Agent 使用 OpenClaw 原生 Skills（如 feishu-doc、weather 等）及其技能说明上下文。建议仅对可信 Agent 开启。' }
-              ].map((cap) => {
-                const isEnabled = agent?.capabilities?.[cap.key as 'read'|'write'|'exec'|'invite'|'skills'] ?? false;
-                return (
-                  <label key={cap.key} className="flex items-center gap-4 cursor-pointer group p-5 rounded-xl border border-neutral-800 bg-neutral-900/50 hover:bg-neutral-800 hover:border-neutral-700 transition-colors">
-                    <div className={cn("w-6 h-6 rounded border flex items-center justify-center transition-colors shrink-0", isEnabled ? "bg-indigo-600 border-indigo-600 text-white" : "border-neutral-600 bg-neutral-800")}>
-                      {isEnabled && <Check className="w-4 h-4" />}
+            <div className="space-y-5">
+              {groupedToolCatalog.map((section) => (
+                <div key={section.sectionId} className="rounded-xl border border-neutral-800 bg-neutral-900/50 p-4">
+                  <div className="flex items-center justify-between mb-3">
+                    <div className="text-sm font-semibold text-neutral-200">{section.sectionLabel}</div>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => applySectionTools(section.sectionId, true)}
+                        disabled={isUpdatingTools}
+                        className="px-2 py-1 rounded-md border border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/10 disabled:opacity-60 text-[11px]"
+                      >
+                        本类全开
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => applySectionTools(section.sectionId, false)}
+                        disabled={isUpdatingTools}
+                        className="px-2 py-1 rounded-md border border-rose-500/40 text-rose-300 hover:bg-rose-500/10 disabled:opacity-60 text-[11px]"
+                      >
+                        本类全关
+                      </button>
                     </div>
-                    <input
-                      type="checkbox"
-                      className="hidden"
-                      checked={isEnabled}
-                      disabled={isUpdatingCapabilities}
-                      onChange={() => toggleAgentCapability(configAgentId, cap.key as 'read'|'write'|'exec'|'invite'|'skills')}
-                    />
-                    <div>
-                      <div className="text-base font-medium text-neutral-200 group-hover:text-white transition-colors">{cap.label}</div>
-                      <div className="text-sm text-neutral-500 mt-1">{cap.desc}</div>
-                    </div>
-                  </label>
-                );
-              })}
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    {section.items.map((tool) => {
+                      const isEnabled = (agent?.toolsAlsoAllow || []).includes(tool.id);
+                      return (
+                        <label key={tool.id} className="flex items-center gap-3 cursor-pointer group p-3 rounded-lg border border-neutral-800 bg-neutral-950/70 hover:bg-neutral-900 transition-colors">
+                          <div className={cn("w-5 h-5 rounded border flex items-center justify-center transition-colors shrink-0", isEnabled ? "bg-indigo-600 border-indigo-600 text-white" : "border-neutral-600 bg-neutral-800")}>
+                            {isEnabled && <Check className="w-3 h-3" />}
+                          </div>
+                          <input
+                            type="checkbox"
+                            className="hidden"
+                            checked={isEnabled}
+                            disabled={isUpdatingTools}
+                            onChange={() => toggleAgentTool(configAgentId, tool.id)}
+                          />
+                          <div className="min-w-0">
+                            <div className="text-sm font-medium text-neutral-200 group-hover:text-white transition-colors font-mono truncate">{tool.id}</div>
+                            <div className="text-xs text-neutral-500 mt-0.5 truncate">{tool.description || 'OpenClaw 原生工具权限开关'}</div>
+                          </div>
+                        </label>
+                      );
+                    })}
+                  </div>
+                </div>
+              ))}
+              {groupedToolCatalog.length === 0 ? (
+                <div className="rounded-lg border border-neutral-800 bg-neutral-900/60 px-4 py-3 text-sm text-neutral-500">
+                  暂无可配置的工具列表，请先刷新 Agent 列表或在 OpenClaw 中配置 tools.alsoAllow。
+                </div>
+              ) : null}
             </div>
 
             <div className="mt-8 rounded-xl border border-neutral-800 bg-neutral-900/40 p-5">
@@ -512,6 +688,28 @@ export function SettingsView({
 
               <div className="text-xs text-neutral-500">
                 会话状态：{wizardSessionId ? '运行中' : '未启动'}{wizardExited ? `（已退出，code=${wizardExitCode ?? 'n/a'}）` : ''}
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-emerald-700/40 bg-emerald-950/10 p-5 space-y-3">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <div className="text-sm font-semibold text-emerald-200">Clawchating Channel 注册</div>
+                  <div className="text-xs text-emerald-100/70 mt-1">
+                    点击后会自动执行注册脚本：写入插件加载路径、启用插件、初始化 channels.clawchating，并调用 openclaw channels add。
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => handleRegisterClawchatingChannel()}
+                  disabled={isRegisteringChannel}
+                  className="px-3 py-1.5 rounded-lg border border-emerald-500/40 text-xs text-emerald-200 hover:bg-emerald-500/10 disabled:opacity-60"
+                >
+                  {isRegisteringChannel ? '注册中...' : '注册 clawchating channel'}
+                </button>
+              </div>
+              <div className="text-xs text-neutral-500">
+                注册完成后建议执行网关重启，确保新插件被加载。
               </div>
             </div>
 

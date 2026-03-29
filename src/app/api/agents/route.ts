@@ -15,23 +15,11 @@ type OpenClawAgent = {
     [key: string]: unknown;
   };
   avatar?: string;
-  clawchating?: {
-    skillsEnabled?: boolean;
-    [key: string]: unknown;
-  };
   tools?: {
     alsoAllow?: string[];
     [key: string]: unknown;
   };
   [key: string]: unknown;
-};
-
-type AgentCapabilities = {
-  read: boolean;
-  write: boolean;
-  exec: boolean;
-  invite: boolean;
-  skills: boolean;
 };
 
 type OpenClawConfig = {
@@ -66,7 +54,43 @@ type OpenClawModelSummary = {
   tags: string[];
 };
 
+type ToolCatalogItem = {
+  id: string;
+  label: string;
+  description: string;
+  sectionId: string;
+  source: 'core' | 'detected';
+};
+
 const execFileAsync = promisify(execFile);
+const CORE_TOOL_CATALOG: ToolCatalogItem[] = [
+  { id: 'read', label: 'read', description: 'Read file contents', sectionId: 'fs', source: 'core' },
+  { id: 'write', label: 'write', description: 'Create or overwrite files', sectionId: 'fs', source: 'core' },
+  { id: 'edit', label: 'edit', description: 'Make precise edits', sectionId: 'fs', source: 'core' },
+  { id: 'apply_patch', label: 'apply_patch', description: 'Patch files (OpenAI)', sectionId: 'fs', source: 'core' },
+  { id: 'exec', label: 'exec', description: 'Run shell commands', sectionId: 'runtime', source: 'core' },
+  { id: 'process', label: 'process', description: 'Manage background processes', sectionId: 'runtime', source: 'core' },
+  { id: 'web_search', label: 'web_search', description: 'Search the web', sectionId: 'web', source: 'core' },
+  { id: 'web_fetch', label: 'web_fetch', description: 'Fetch web content', sectionId: 'web', source: 'core' },
+  { id: 'memory_search', label: 'memory_search', description: 'Semantic search', sectionId: 'memory', source: 'core' },
+  { id: 'memory_get', label: 'memory_get', description: 'Read memory files', sectionId: 'memory', source: 'core' },
+  { id: 'sessions_list', label: 'sessions_list', description: 'List sessions', sectionId: 'sessions', source: 'core' },
+  { id: 'sessions_history', label: 'sessions_history', description: 'Session history', sectionId: 'sessions', source: 'core' },
+  { id: 'sessions_send', label: 'sessions_send', description: 'Send to session', sectionId: 'sessions', source: 'core' },
+  { id: 'sessions_spawn', label: 'sessions_spawn', description: 'Spawn sub-agent', sectionId: 'sessions', source: 'core' },
+  { id: 'subagents', label: 'subagents', description: 'Manage sub-agents', sectionId: 'sessions', source: 'core' },
+  { id: 'session_status', label: 'session_status', description: 'Session status', sectionId: 'sessions', source: 'core' },
+  { id: 'browser', label: 'browser', description: 'Control web browser', sectionId: 'ui', source: 'core' },
+  { id: 'canvas', label: 'canvas', description: 'Control canvases', sectionId: 'ui', source: 'core' },
+  { id: 'message', label: 'message', description: 'Send messages', sectionId: 'messaging', source: 'core' },
+  { id: 'cron', label: 'cron', description: 'Schedule tasks', sectionId: 'automation', source: 'core' },
+  { id: 'gateway', label: 'gateway', description: 'Gateway control', sectionId: 'automation', source: 'core' },
+  { id: 'nodes', label: 'nodes', description: 'Nodes + devices', sectionId: 'nodes', source: 'core' },
+  { id: 'agents_list', label: 'agents_list', description: 'List agents', sectionId: 'agents', source: 'core' },
+  { id: 'image', label: 'image', description: 'Image understanding', sectionId: 'media', source: 'core' },
+  { id: 'tts', label: 'tts', description: 'Text-to-speech conversion', sectionId: 'media', source: 'core' },
+];
+const CORE_TOOL_IDS = CORE_TOOL_CATALOG.map((item) => item.id);
 
 function parseJsonFromMixedOutput(stdout: string, stderr: string) {
   const directCandidates = [stdout.trim(), stderr.trim()].filter(Boolean);
@@ -201,54 +225,35 @@ function setDefaultAgentsInConfig(config: OpenClawConfig, targetIds: string[]) {
   return true;
 }
 
-const CAPABILITY_TOOL_MAP: Record<keyof AgentCapabilities, string[]> = {
-  read: ['read'],
-  write: ['write', 'edit', 'apply_patch'],
-  exec: ['exec', 'process'],
-  invite: ['subagents', 'agents_list'],
-  skills: ['skills'],
-};
-
-function getCapabilitiesFromOpenClawTools(agent: OpenClawAgent | undefined, config?: OpenClawConfig) {
-  if (!agent) {
-    return {
-      read: true,
-      write: true,
-      exec: false,
-      invite: false,
-      skills: config?.commands?.nativeSkills !== 'off',
-    };
-  }
-  const alsoAllow: string[] = agent?.tools?.alsoAllow || [];
-  const globalNativeSkills = config?.commands?.nativeSkills;
-  const globalSkillsEnabled = globalNativeSkills !== 'off';
-  const agentSkillsEnabled = typeof agent?.clawchating?.skillsEnabled === 'boolean'
-    ? agent.clawchating.skillsEnabled
-    : undefined;
-  return {
-    read: alsoAllow.includes('read'),
-    write: alsoAllow.includes('write') || alsoAllow.includes('edit') || alsoAllow.includes('apply_patch'),
-    exec: alsoAllow.includes('exec') || alsoAllow.includes('process'),
-    invite: alsoAllow.includes('subagents') || alsoAllow.includes('agents_list'),
-    skills: agentSkillsEnabled ?? (alsoAllow.includes('skills') || globalSkillsEnabled),
-  };
+function normalizeToolList(input: unknown) {
+  if (!Array.isArray(input)) return [] as string[];
+  return Array.from(new Set(input.map((item) => String(item || '').trim()).filter(Boolean)));
 }
 
-function applyCapabilitiesToAlsoAllow(existing: string[], capabilities: AgentCapabilities) {
-  const next = new Set(existing);
-
-  for (const capability of Object.keys(CAPABILITY_TOOL_MAP) as Array<keyof AgentCapabilities>) {
-    for (const toolName of CAPABILITY_TOOL_MAP[capability]) {
-      next.delete(toolName);
-    }
-    if (capabilities[capability]) {
-      for (const toolName of CAPABILITY_TOOL_MAP[capability]) {
-        next.add(toolName);
-      }
-    }
+function collectKnownTools(config: OpenClawConfig) {
+  const known = new Set<string>(CORE_TOOL_IDS);
+  const list = Array.isArray(config.agents?.list) ? config.agents.list : [];
+  for (const agent of list) {
+    const alsoAllow = normalizeToolList(agent?.tools?.alsoAllow);
+    for (const toolName of alsoAllow) known.add(toolName);
   }
+  return Array.from(known).sort((a, b) => a.localeCompare(b));
+}
 
-  return Array.from(next);
+function buildToolCatalog(config: OpenClawConfig) {
+  const catalog = new Map<string, ToolCatalogItem>(CORE_TOOL_CATALOG.map((item) => [item.id, item]));
+  const knownTools = collectKnownTools(config);
+  for (const toolId of knownTools) {
+    if (catalog.has(toolId)) continue;
+    catalog.set(toolId, {
+      id: toolId,
+      label: toolId,
+      description: 'Detected from current OpenClaw agent allowlist.',
+      sectionId: 'custom',
+      source: 'detected',
+    });
+  }
+  return Array.from(catalog.values()).sort((a, b) => a.id.localeCompare(b.id));
 }
 
 export async function GET(req: Request) {
@@ -312,7 +317,7 @@ export async function GET(req: Request) {
         avatarEmoji: avatarEmoji || undefined,
         hasAvatarImage: !!avatarPath,
         isDefault,
-        capabilities: getCapabilitiesFromOpenClawTools(configAgent, config),
+        toolsAlsoAllow: normalizeToolList(configAgent?.tools?.alsoAllow),
       };
     });
 
@@ -326,11 +331,16 @@ export async function GET(req: Request) {
         avatarEmoji: undefined,
         hasAvatarImage: false,
         isDefault: true,
-        capabilities: { read: true, write: true, exec: false, invite: false, skills: true },
+        toolsAlsoAllow: [],
       });
     }
     
-    return NextResponse.json({ agents: UI_AGENTS });
+    const toolCatalog = buildToolCatalog(config);
+    return NextResponse.json({
+      agents: UI_AGENTS,
+      availableTools: toolCatalog.map((item) => item.id),
+      toolCatalog,
+    });
   } catch (error) {
     console.error('Failed to parse openclaw config:', error);
     return NextResponse.json(
@@ -343,8 +353,10 @@ export async function GET(req: Request) {
           avatarEmoji: undefined,
           hasAvatarImage: false,
           isDefault: true,
-          capabilities: { read: true, write: true, exec: false, invite: false, skills: true },
+          toolsAlsoAllow: [],
         }],
+        availableTools: CORE_TOOL_IDS,
+        toolCatalog: CORE_TOOL_CATALOG,
       }
     );
   }
@@ -352,22 +364,16 @@ export async function GET(req: Request) {
 
 export async function PUT(req: Request) {
   try {
-    const { agentId, capabilities } = await req.json() as {
+    const { agentId, alsoAllow, action, availableTools } = await req.json() as {
       agentId?: string;
-      capabilities?: Partial<AgentCapabilities>;
+      alsoAllow?: string[];
+      action?: 'all-on' | 'all-off';
+      availableTools?: string[];
     };
 
     if (!agentId || typeof agentId !== 'string') {
       return NextResponse.json({ error: 'agentId is required' }, { status: 400 });
     }
-
-    const normalizedCapabilities: AgentCapabilities = {
-      read: !!capabilities?.read,
-      write: !!capabilities?.write,
-      exec: !!capabilities?.exec,
-      invite: !!capabilities?.invite,
-      skills: !!capabilities?.skills,
-    };
 
     const homedir = os.homedir();
     const configPath = path.join(homedir, '.openclaw', 'openclaw.json');
@@ -389,15 +395,22 @@ export async function PUT(req: Request) {
     }
 
     const agent = list[index];
-    const currentAlsoAllow = Array.isArray(agent.tools?.alsoAllow) ? agent.tools?.alsoAllow : [];
-    const nextAlsoAllow = applyCapabilitiesToAlsoAllow(currentAlsoAllow, normalizedCapabilities);
+    const currentAlsoAllow = normalizeToolList(agent.tools?.alsoAllow);
+    const knownTools = Array.from(new Set([...collectKnownTools(config), ...normalizeToolList(availableTools)]));
+
+    let nextAlsoAllow: string[];
+    if (action === 'all-off') {
+      nextAlsoAllow = [];
+    } else if (action === 'all-on') {
+      nextAlsoAllow = knownTools;
+    } else if (Array.isArray(alsoAllow)) {
+      nextAlsoAllow = normalizeToolList(alsoAllow);
+    } else {
+      nextAlsoAllow = currentAlsoAllow;
+    }
 
     list[index] = {
       ...agent,
-      clawchating: {
-        ...(((agent as OpenClawAgent).clawchating || {}) as Record<string, unknown>),
-        skillsEnabled: normalizedCapabilities.skills,
-      },
       tools: {
         ...(agent.tools || {}),
         alsoAllow: nextAlsoAllow,
@@ -406,10 +419,20 @@ export async function PUT(req: Request) {
 
     fs.writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf8');
 
-    return NextResponse.json({ success: true, agentId, capabilities: normalizedCapabilities });
+    const refreshedContent = fs.readFileSync(configPath, 'utf8');
+    const refreshedConfig = JSON.parse(refreshedContent) as OpenClawConfig;
+    const refreshedCatalog = buildToolCatalog(refreshedConfig);
+
+    return NextResponse.json({
+      success: true,
+      agentId,
+      alsoAllow: nextAlsoAllow,
+      availableTools: refreshedCatalog.map((item) => item.id),
+      toolCatalog: refreshedCatalog,
+    });
   } catch (error) {
-    console.error('Failed to update agent capabilities:', error);
-    return NextResponse.json({ error: 'Failed to update capabilities' }, { status: 500 });
+    console.error('Failed to update agent tools allowlist:', error);
+    return NextResponse.json({ error: 'Failed to update tools allowlist' }, { status: 500 });
   }
 }
 

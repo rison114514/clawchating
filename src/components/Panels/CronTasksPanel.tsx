@@ -19,7 +19,13 @@ interface CronTasksPanelProps {
 export function CronTasksPanel({
   isOpen, onClose, crons, agents, activeSession, globalChannelId, currentGroupMembers, addCron, removeCron, updateCron
 }: CronTasksPanelProps) {
-  const [newCron, setNewCron] = useState({ agentId: '', intervalMin: 5, prompt: '' });
+  const [newCron, setNewCron] = useState({
+    agentId: '',
+    scheduleType: 'interval' as 'interval' | 'daily',
+    intervalMin: 5,
+    dailyTime: '09:00',
+    prompt: '',
+  });
   
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editCron, setEditCron] = useState<any>({});
@@ -36,11 +42,17 @@ export function CronTasksPanel({
     if (editingId) {
       updateCron(editingId, { 
         agentId: editCron.agentId, 
+        scheduleType: editCron.scheduleType,
         intervalMin: editCron.intervalMin, 
+        dailyTime: editCron.dailyTime,
         prompt: editCron.prompt 
       });
       setEditingId(null);
     }
+  };
+
+  const toggleActive = (cron: CronTask) => {
+    updateCron(cron.id, { active: cron.active === false ? true : false });
   };
 
   return (
@@ -86,15 +98,32 @@ export function CronTasksPanel({
                               return a ? <option key={id} value={id}>{a.name}</option> : null;
                             })}
                           </select>
-                          <div className="flex items-center gap-2 bg-neutral-900 border border-neutral-700 rounded-lg px-2 text-sm">
-                            <input 
-                              type="number" min="1" 
-                              value={editCron.intervalMin} 
-                              onChange={e => setEditCron({...editCron, intervalMin: Number(e.target.value)})}
-                              className="w-12 bg-transparent focus:outline-none text-center" 
+                          <select
+                            value={editCron.scheduleType || 'interval'}
+                            onChange={(e) => setEditCron({ ...editCron, scheduleType: e.target.value as 'interval' | 'daily' })}
+                            className="bg-neutral-900 border border-neutral-700 rounded-lg text-sm px-2 py-1.5 focus:outline-none focus:border-orange-500/50"
+                          >
+                            <option value="interval">每隔 N 分钟</option>
+                            <option value="daily">每天固定时间</option>
+                          </select>
+                          {(editCron.scheduleType || 'interval') === 'interval' ? (
+                            <div className="flex items-center gap-2 bg-neutral-900 border border-neutral-700 rounded-lg px-2 text-sm">
+                              <input 
+                                type="number" min="1" 
+                                value={editCron.intervalMin} 
+                                onChange={e => setEditCron({...editCron, intervalMin: Number(e.target.value)})}
+                                className="w-12 bg-transparent focus:outline-none text-center" 
+                              />
+                              <span className="text-neutral-500 pr-1">分</span>
+                            </div>
+                          ) : (
+                            <input
+                              type="time"
+                              value={editCron.dailyTime || '09:00'}
+                              onChange={(e) => setEditCron({ ...editCron, dailyTime: e.target.value })}
+                              className="bg-neutral-900 border border-neutral-700 rounded-lg text-sm px-2 py-1.5 focus:outline-none focus:border-orange-500/50"
                             />
-                            <span className="text-neutral-500 pr-1">分</span>
-                          </div>
+                          )}
                         </div>
                         <textarea 
                           value={editCron.prompt} 
@@ -124,11 +153,26 @@ export function CronTasksPanel({
                                 @{agents.find(a => a.id === cron.agentId)?.name || cron.agentId}
                               </span>
                               <span className="text-xs text-orange-400/80 flex items-center gap-1">
-                                <PlayCircle className="w-3 h-3" /> 每 {cron.intervalMin} 分钟
+                                <PlayCircle className="w-3 h-3" />
+                                {cron.scheduleType === 'daily'
+                                  ? `每天 ${cron.dailyTime || '09:00'}`
+                                  : `每 ${cron.intervalMin || 5} 分钟`}
                               </span>
                             </div>
                           </div>
                           <div className="flex items-center gap-1">
+                            <button
+                              onClick={() => toggleActive(cron)}
+                              className={cn(
+                                'px-2 py-1 text-[11px] rounded-md border transition-colors',
+                                cron.active === false
+                                  ? 'border-neutral-700 text-neutral-400 hover:text-white hover:border-neutral-500'
+                                  : 'border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/10'
+                              )}
+                              title={cron.active === false ? '开启任务' : '暂停任务'}
+                            >
+                              {cron.active === false ? '已暂停' : '运行中'}
+                            </button>
                             <button onClick={() => startEdit(cron)} className="p-1.5 text-neutral-500 hover:text-indigo-400 transition-colors" title="编辑">
                               <Edit2 className="w-4 h-4" />
                             </button>
@@ -165,15 +209,32 @@ export function CronTasksPanel({
                   return a ? <option key={id} value={id}>{a.name}</option> : null;
                 })}
               </select>
-              <div className="flex items-center gap-2 bg-neutral-950 border border-neutral-800 rounded-xl px-2 text-sm focus-within:border-orange-500/50 transition-colors">
-                <input 
-                  type="number" min="1" 
-                  value={newCron.intervalMin} 
-                  onChange={e => setNewCron({...newCron, intervalMin: Number(e.target.value)})}
-                  className="w-12 bg-transparent focus:outline-none text-center" 
+              <select
+                value={newCron.scheduleType}
+                onChange={(e) => setNewCron({ ...newCron, scheduleType: e.target.value as 'interval' | 'daily' })}
+                className="bg-neutral-950 border border-neutral-800 rounded-xl text-sm px-3 py-2 focus:outline-none focus:border-orange-500/50 transition-colors"
+              >
+                <option value="interval">每隔 N 分钟</option>
+                <option value="daily">每天固定时间</option>
+              </select>
+              {newCron.scheduleType === 'interval' ? (
+                <div className="flex items-center gap-2 bg-neutral-950 border border-neutral-800 rounded-xl px-2 text-sm focus-within:border-orange-500/50 transition-colors">
+                  <input 
+                    type="number" min="1" 
+                    value={newCron.intervalMin} 
+                    onChange={e => setNewCron({...newCron, intervalMin: Number(e.target.value)})}
+                    className="w-12 bg-transparent focus:outline-none text-center" 
+                  />
+                  <span className="text-neutral-500 pr-2">分钟</span>
+                </div>
+              ) : (
+                <input
+                  type="time"
+                  value={newCron.dailyTime}
+                  onChange={(e) => setNewCron({ ...newCron, dailyTime: e.target.value })}
+                  className="bg-neutral-950 border border-neutral-800 rounded-xl text-sm px-3 py-2 focus:outline-none focus:border-orange-500/50 transition-colors"
                 />
-                <span className="text-neutral-500 pr-2">分钟</span>
-              </div>
+              )}
             </div>
             
             <textarea 
@@ -189,11 +250,20 @@ export function CronTasksPanel({
                 const newTask = {
                   groupId,
                   agentId: newCron.agentId,
+                  scheduleType: newCron.scheduleType,
                   intervalMin: newCron.intervalMin,
+                  dailyTime: newCron.dailyTime,
+                  active: true,
                   prompt: newCron.prompt
                 };
                 addCron(newTask);
-                setNewCron({ agentId: '', intervalMin: 5, prompt: '' });
+                setNewCron({
+                  agentId: '',
+                  scheduleType: 'interval',
+                  intervalMin: 5,
+                  dailyTime: '09:00',
+                  prompt: '',
+                });
               }}
               className="w-full py-3 rounded-xl text-sm bg-orange-500 hover:bg-orange-400 text-neutral-900 disabled:opacity-50 disabled:cursor-not-allowed transition-all font-semibold flex items-center justify-center gap-2 shadow-lg shadow-orange-500/20"
             >

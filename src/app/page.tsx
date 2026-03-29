@@ -11,16 +11,8 @@ import { CreateGroupModal } from '../components/Modals/CreateGroupModal';
 import { ChatArea } from '../components/ChatArea';
 
 const INITIAL_AGENTS: Agent[] = [
-  { id: 'main', name: '爪爪 - 本地启动中...', icon: Bot, color: 'text-indigo-500', capabilities: { read: true, write: true, exec: false, invite: false, skills: true } }
+  { id: 'main', name: '爪爪 - 本地启动中...', icon: Bot, color: 'text-indigo-500', toolsAlsoAllow: [] }
 ];
-
-type AgentCapabilities = {
-  read: boolean;
-  write: boolean;
-  exec: boolean;
-  invite: boolean;
-  skills: boolean;
-};
 
 type OpenClawModelConfig = {
   configPath: string;
@@ -49,7 +41,15 @@ type OpenClawProviderOption = {
   choices: string[];
 };
 
-const DEFAULT_CAPABILITIES: AgentCapabilities = { read: true, write: true, exec: false, invite: false, skills: true };
+type ToolCatalogItem = {
+  id: string;
+  label: string;
+  description: string;
+  sectionId: string;
+  source: 'core' | 'detected';
+};
+
+const MESSAGE_PAGE_SIZE = 50;
 
 export default function Chat() {
   const [agents, setAgents] = useState<Agent[]>(INITIAL_AGENTS);
@@ -62,7 +62,9 @@ export default function Chat() {
   const [activeConfigFileName, setActiveConfigFileName] = useState<string | null>(null);
   const [basicConfigContent, setBasicConfigContent] = useState<string>('');
   const [isSavingConfig, setIsSavingConfig] = useState(false);
-  const [savingCapabilityAgentId, setSavingCapabilityAgentId] = useState<string | null>(null);
+  const [availableTools, setAvailableTools] = useState<string[]>([]);
+  const [toolCatalog, setToolCatalog] = useState<ToolCatalogItem[]>([]);
+  const [savingToolsAgentId, setSavingToolsAgentId] = useState<string | null>(null);
   const [nativeSkills, setNativeSkills] = useState<Array<{ name: string; description?: string; source?: string }>>([]);
   const [modelOptions, setModelOptions] = useState<Array<{ key: string; name?: string }>>([]);
   const [isLoadingModelOptions, setIsLoadingModelOptions] = useState(false);
@@ -85,6 +87,9 @@ export default function Chat() {
   const [viewingFile, setViewingFile] = useState<{name: string, content: string}|null>(null);
 
   const [messages, setMessages] = useState<any[]>([]);
+  const [hasMoreHistory, setHasMoreHistory] = useState(false);
+  const [isLoadingHistory, setIsLoadingHistory] = useState(false);
+  const [isRefreshingMessages, setIsRefreshingMessages] = useState(false);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
 
@@ -207,19 +212,88 @@ export default function Chat() {
     }));
   };
 
-  const loadCurrentMessages = async () => {
-    if (activeSession.type === 'group') {
-      const res = await fetch(`/api/messages?groupId=${encodeURIComponent(activeSession.id)}&channelId=${encodeURIComponent(activeChannelId)}`);
-      const data = await res.json();
-      const loaded = Array.isArray(data) ? normalizeLoadedMessages(data) : [];
-      setMessages(loaded);
-      return;
-    }
+  const loadCurrentMessages = async (traceId?: string) => {
+    setIsRefreshingMessages(true);
+    try {
+      if (activeSession.type === 'group') {
+        const traceParam = traceId ? `&traceId=${encodeURIComponent(traceId)}` : '';
+        const res = await fetch(
+          `/api/messages?groupId=${encodeURIComponent(activeSession.id)}&channelId=${encodeURIComponent(activeChannelId)}&limit=${MESSAGE_PAGE_SIZE}&offset=0${traceParam}`
+        );
+        const data = await res.json();
+        const loaded = Array.isArray(data?.messages) ? normalizeLoadedMessages(data.messages) : [];
+        setMessages(loaded);
+        setHasMoreHistory(!!data?.hasMore);
+        return;
+      }
 
-    const res = await fetch(`/api/messages?agentId=${loadAgentId}&sessionKey=${encodeURIComponent(sessionIdentifier)}`);
-    const data = await res.json();
-    const loaded = Array.isArray(data) ? normalizeLoadedMessages(data) : [];
-    setMessages(loaded);
+      const traceParam = traceId ? `&traceId=${encodeURIComponent(traceId)}` : '';
+      const res = await fetch(
+        `/api/messages?agentId=${loadAgentId}&sessionKey=${encodeURIComponent(sessionIdentifier)}&limit=${MESSAGE_PAGE_SIZE}&offset=0${traceParam}`
+      );
+      const data = await res.json();
+      const loaded = Array.isArray(data?.messages) ? normalizeLoadedMessages(data.messages) : [];
+      setMessages(loaded);
+      setHasMoreHistory(!!data?.hasMore);
+    } finally {
+      setIsRefreshingMessages(false);
+    }
+  };
+
+  const loadHistoryMessages = async () => {
+    if (isLoadingHistory || !hasMoreHistory) return;
+    setIsLoadingHistory(true);
+    try {
+      const currentCount = messages.length;
+      if (activeSession.type === 'group') {
+        const res = await fetch(
+          `/api/messages?groupId=${encodeURIComponent(activeSession.id)}&channelId=${encodeURIComponent(activeChannelId)}&limit=${MESSAGE_PAGE_SIZE}&offset=${currentCount}`
+        );
+        const data = await res.json();
+        const older = Array.isArray(data?.messages) ? normalizeLoadedMessages(data.messages) : [];
+        setMessages((prev) => [...older, ...prev]);
+        setHasMoreHistory(!!data?.hasMore);
+        return;
+      }
+
+      const res = await fetch(
+        `/api/messages?agentId=${loadAgentId}&sessionKey=${encodeURIComponent(sessionIdentifier)}&limit=${MESSAGE_PAGE_SIZE}&offset=${currentCount}`
+      );
+      const data = await res.json();
+      const older = Array.isArray(data?.messages) ? normalizeLoadedMessages(data.messages) : [];
+      setMessages((prev) => [...older, ...prev]);
+      setHasMoreHistory(!!data?.hasMore);
+    } finally {
+      setIsLoadingHistory(false);
+    }
+  };
+
+  const handleRecoverMessage = async (messageId: string, agentId: string) => {
+    if (!currentGroup) return false;
+    try {
+      const res = await fetch('/api/chat/recover', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          agentId,
+          groupId: currentGroup.id,
+          channelId: currentGroup.channelId,
+          lookbackSeconds: 900
+        }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        if (activeSession.type === 'group') {
+          // Force reload current view
+          await loadCurrentMessages();
+        }
+        return true;
+      }
+      return false;
+    } catch (e) {
+      console.error(e);
+      return false;
+    }
   };
 
   useEffect(() => {
@@ -236,11 +310,10 @@ export default function Chat() {
     if (!latestInput.trim()) return;
 
     const mentionedInSubmit = resolveMentionedAgentId(latestInput);
+    const clientTraceId = `ui_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const targetAgentIdForSubmit = mentionedInSubmit
       ? mentionedInSubmit
       : (activeSession.type === 'agent' ? activeSession.id : resolveGroupDefaultAgentId());
-
-    const targetAgent = agents.find(a => a.id === targetAgentIdForSubmit);
 
     setMessages((current) => [
       ...current,
@@ -261,7 +334,7 @@ export default function Chat() {
           inputText: latestInput,
           agentId: targetAgentIdForSubmit,
           isMention: !!mentionedInSubmit,
-          capabilities: targetAgent?.capabilities || DEFAULT_CAPABILITIES,
+          timeoutSeconds: 600,
           channelId: activeChannelId,
           sessionType: activeSession.type,
           groupId: activeSession.type === 'group' ? activeSession.id : undefined,
@@ -269,16 +342,30 @@ export default function Chat() {
           senderId: resolveUiPeerId(),
           senderName: 'Clawchating User',
           autoMentionName: 'Clawchating User',
+          traceId: clientTraceId,
         }),
       });
 
-      const data = await res.json();
+      const raw = await res.text();
+      const data = raw
+        ? (() => {
+            try {
+              return JSON.parse(raw);
+            } catch {
+              return { error: raw };
+            }
+          })()
+        : {};
       if (!res.ok) {
         throw new Error(data?.error || 'Chat request failed');
       }
 
+      const effectiveTraceId = typeof data?.traceId === 'string' && data.traceId.trim()
+        ? data.traceId
+        : clientTraceId;
+
       if (activeSession.type === 'group') {
-        await loadCurrentMessages();
+        await loadCurrentMessages(effectiveTraceId);
       } else {
         setMessages((current) => [
           ...current,
@@ -287,17 +374,22 @@ export default function Chat() {
             role: 'assistant',
             content: data?.message?.content || '系统未返回有效回复。',
             name: data?.message?.name || targetAgentIdForSubmit,
+            meta: { traceId: effectiveTraceId },
           },
         ]);
       }
     } catch (error) {
       console.error(error);
+      const errorMessage = error instanceof Error ? error.message : String(error || '未知错误');
+      const userFacingError = /aborted|timeout|timed out|超时|中止/i.test(errorMessage)
+        ? `请求超时或被中止：${errorMessage}`
+        : `请求失败：${errorMessage}`;
       setMessages((current) => [
         ...current,
         {
           id: `${Date.now()}-error`,
           role: 'assistant',
-          content: '请求失败，请检查 OpenClaw 网关状态或配置。',
+          content: userFacingError,
           name: targetAgentIdForSubmit,
         },
       ]);
@@ -327,6 +419,24 @@ export default function Chat() {
     try {
       const res = await fetch('/api/agents');
       const data = await res.json();
+      setAvailableTools(
+        Array.isArray(data?.availableTools)
+          ? data.availableTools.map((item: unknown) => String(item)).filter(Boolean)
+          : []
+      );
+      setToolCatalog(
+        Array.isArray(data?.toolCatalog)
+          ? data.toolCatalog
+              .map((item: any) => ({
+                id: String(item?.id || ''),
+                label: String(item?.label || item?.id || ''),
+                description: String(item?.description || ''),
+                sectionId: String(item?.sectionId || 'custom'),
+                source: item?.source === 'core' ? 'core' : 'detected',
+              }))
+              .filter((item: ToolCatalogItem) => !!item.id)
+          : []
+      );
       if (data?.agents?.length > 0) {
         const ICON_MAP = { Bot, Cpu, Code, Terminal, Zap, Settings, PenTool, ImageIcon };
         const loadedAgents = data.agents.map((a: any) => ({
@@ -337,13 +447,9 @@ export default function Chat() {
           avatarEmoji: typeof a.avatarEmoji === 'string' ? a.avatarEmoji : undefined,
           hasAvatarImage: !!a.hasAvatarImage,
           isDefault: !!a.isDefault,
-          capabilities: {
-            read: !!a.capabilities?.read,
-            write: !!a.capabilities?.write,
-            exec: !!a.capabilities?.exec,
-            invite: !!a.capabilities?.invite,
-            skills: !!a.capabilities?.skills,
-          }
+          toolsAlsoAllow: Array.isArray(a?.toolsAlsoAllow)
+            ? a.toolsAlsoAllow.map((item: unknown) => String(item)).filter(Boolean)
+            : [],
         }));
         setAgents(loadedAgents);
         if (activeSession.type === 'agent' && !loadedAgents.find((a: any) => a.id === activeSession.id)) {
@@ -816,36 +922,83 @@ export default function Chat() {
     ? (agents.find(a => a.id === activeSession.id) || agents[0])
     : { name: currentGroup?.name || '未知群聊', id: currentGroup?.id, icon: Users, color: 'text-orange-500' };
 
-  const toggleAgentCapability = async (agentId: string, cap: 'read' | 'write' | 'exec' | 'invite' | 'skills') => {
-    if (savingCapabilityAgentId === agentId) return;
+  const updateAgentToolsAllow = async (agentId: string, payload: { alsoAllow?: string[]; action?: 'all-on' | 'all-off' }) => {
+    if (savingToolsAgentId === agentId) return;
 
-    const currentAgent = agents.find(a => a.id === agentId);
-    if (!currentAgent || !currentAgent.capabilities) return;
+    const currentAgent = agents.find((a) => a.id === agentId);
+    if (!currentAgent) return;
+    const previousTools = Array.isArray(currentAgent.toolsAlsoAllow) ? currentAgent.toolsAlsoAllow : [];
 
-    const previousCapabilities = currentAgent.capabilities;
-    const nextCapabilities = { ...previousCapabilities, [cap]: !previousCapabilities[cap] };
+    const optimisticTools = payload.action === 'all-off'
+      ? []
+      : payload.action === 'all-on'
+        ? availableTools
+        : (payload.alsoAllow || previousTools);
 
-    setAgents(prev => prev.map(a => (a.id === agentId ? { ...a, capabilities: nextCapabilities } : a)));
-    setSavingCapabilityAgentId(agentId);
+    setAgents((prev) => prev.map((a) => (a.id === agentId ? { ...a, toolsAlsoAllow: optimisticTools } : a)));
+    setSavingToolsAgentId(agentId);
 
     try {
       const res = await fetch('/api/agents', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ agentId, capabilities: nextCapabilities })
+        body: JSON.stringify({
+          agentId,
+          ...payload,
+          availableTools,
+        }),
       });
-
+      const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err?.error || 'Failed to persist capability changes');
+        throw new Error((data as any)?.error || 'Failed to persist tools allowlist');
+      }
+
+      const persisted = Array.isArray((data as any)?.alsoAllow)
+        ? (data as any).alsoAllow.map((item: unknown) => String(item)).filter(Boolean)
+        : optimisticTools;
+      setAgents((prev) => prev.map((a) => (a.id === agentId ? { ...a, toolsAlsoAllow: persisted } : a)));
+      if (Array.isArray((data as any)?.availableTools)) {
+        setAvailableTools((data as any).availableTools.map((item: unknown) => String(item)).filter(Boolean));
+      }
+      if (Array.isArray((data as any)?.toolCatalog)) {
+        setToolCatalog(
+          (data as any).toolCatalog
+            .map((item: any) => ({
+              id: String(item?.id || ''),
+              label: String(item?.label || item?.id || ''),
+              description: String(item?.description || ''),
+              sectionId: String(item?.sectionId || 'custom'),
+              source: item?.source === 'core' ? 'core' : 'detected',
+            }))
+            .filter((item: ToolCatalogItem) => !!item.id)
+        );
       }
     } catch (e) {
-      console.error('Failed to persist capabilities', e);
-      setAgents(prev => prev.map(a => (a.id === agentId ? { ...a, capabilities: previousCapabilities } : a)));
-      alert('权限保存失败，已回滚本地修改。');
+      console.error('Failed to persist tools allowlist', e);
+      setAgents((prev) => prev.map((a) => (a.id === agentId ? { ...a, toolsAlsoAllow: previousTools } : a)));
+      alert('工具权限保存失败，已回滚本地修改。');
     } finally {
-      setSavingCapabilityAgentId(null);
+      setSavingToolsAgentId(null);
     }
+  };
+
+  const toggleAgentTool = async (agentId: string, toolName: string) => {
+    const currentAgent = agents.find((a) => a.id === agentId);
+    if (!currentAgent) return;
+    const currentTools = Array.isArray(currentAgent.toolsAlsoAllow) ? currentAgent.toolsAlsoAllow : [];
+    const nextTools = currentTools.includes(toolName)
+      ? currentTools.filter((item) => item !== toolName)
+      : [...currentTools, toolName];
+
+    await updateAgentToolsAllow(agentId, { alsoAllow: nextTools });
+  };
+
+  const setAllAgentTools = async (agentId: string, enabled: boolean) => {
+    await updateAgentToolsAllow(agentId, { action: enabled ? 'all-on' : 'all-off' });
+  };
+
+  const setAgentToolsAllow = async (agentId: string, tools: string[]) => {
+    await updateAgentToolsAllow(agentId, { alsoAllow: Array.from(new Set(tools.map((item) => String(item).trim()).filter(Boolean))) });
   };
 
   const openModelConfig = () => {
@@ -933,8 +1086,12 @@ export default function Chat() {
           isSavingConfig={isSavingConfig}
           loadAgentConfigFile={loadAgentConfigFile}
           saveAgentConfigFile={saveAgentConfigFile}
-          toggleAgentCapability={toggleAgentCapability}
-          isUpdatingCapabilities={savingCapabilityAgentId === configAgentId}
+          availableTools={availableTools}
+          toolCatalog={toolCatalog}
+          toggleAgentTool={toggleAgentTool}
+          setAllAgentTools={setAllAgentTools}
+          setAgentToolsAllow={setAgentToolsAllow}
+          isUpdatingTools={savingToolsAgentId === configAgentId}
         />
       ) : (
         <ChatArea 
@@ -950,6 +1107,11 @@ export default function Chat() {
           setIsCronModalOpen={setIsCronModalOpen}
           crons={crons}
           messages={messages}
+          hasMoreHistory={hasMoreHistory}
+          isLoadingHistory={isLoadingHistory}
+          isRefreshingMessages={isRefreshingMessages}
+          onLoadHistoryMessages={loadHistoryMessages}
+          onRefreshMessages={loadCurrentMessages}
           isLoading={isLoading}
           mentionedAgentId={currentMentionedAgentId}
           renderUserTextWithMentions={renderUserTextWithMentions}
@@ -968,6 +1130,7 @@ export default function Chat() {
           onSetLeader={handleSetLeader}
           onRemoveAgent={handleRemoveAgent}
           onDeleteGroup={handleDeleteGroup}
+          onRecoverMessage={handleRecoverMessage}
         />
       )}
     </div>

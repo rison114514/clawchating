@@ -5,6 +5,8 @@ import os from 'os';
 import { appendSessionMessage, initializeGroupSessions } from '@/lib/session-runtime';
 
 const groupsPath = path.join(process.cwd(), 'workspaces', 'groups.json');
+const guideSourcePath = path.join(process.cwd(), 'src', 'doc', 'OPENCLAW_USAGE_GUIDE.md');
+const guideTargetName = 'OPENCLAW_USAGE_GUIDE.md';
 
 async function getGroups() {
   try {
@@ -141,6 +143,22 @@ async function writeGroupContextForMembers(groupId: string, channelId: string, m
   await fs.writeFile(contextPath, sectionBody, 'utf-8');
 }
 
+async function copyOpenClawGuideForNewGroup(groupId: string) {
+  if (!groupId) return;
+
+  const sharedWorkspaceDir = path.resolve(path.join(process.cwd(), 'workspaces', groupId));
+  await fs.mkdir(sharedWorkspaceDir, { recursive: true });
+
+  try {
+    await fs.stat(guideSourcePath);
+  } catch {
+    return;
+  }
+
+  const targetPath = path.join(sharedWorkspaceDir, guideTargetName);
+  await fs.copyFile(guideSourcePath, targetPath);
+}
+
 async function appendJoinInitializationPrompt(
   groupId: string,
   channelId: string,
@@ -156,7 +174,7 @@ async function appendJoinInitializationPrompt(
     const initMessage = [
       `@${member.agentId} [Join Initialization] 你已加入群组 ${groupId}。`,
       `群组上下文文件位于：${contextFilePath}`,
-      `请立即使用 \`read_file\` 工具读取该文件内容，以获取群组背景信息。`,
+      `请立即读取该文件内容，以获取群组背景信息。`,
       `注意：必须真实调用工具读取文件，禁止编造内容。`,
       `频道ID: ${channelId}`,
     ].join('\n');
@@ -202,6 +220,7 @@ export async function POST(req: Request) {
   groups.push(newGroup);
   await saveGroups(groups);
   await ensureGroupWorkspaceMounts(newGroup.id, Array.isArray(newGroup.members) ? newGroup.members : []);
+  await copyOpenClawGuideForNewGroup(newGroup.id);
 
   if (Array.isArray(newGroup.members) && newGroup.members.length > 0) {
     const initializedMembers = await initializeGroupSessions({

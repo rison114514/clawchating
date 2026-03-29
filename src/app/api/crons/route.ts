@@ -25,16 +25,23 @@ export async function GET() {
 export async function POST(req: Request) {
   const newCron = await req.json();
   const crons = await getCrons();
+
+  const normalized = {
+    ...newCron,
+    scheduleType: newCron?.scheduleType === 'daily' ? 'daily' : 'interval',
+    intervalMin: Math.max(1, Number(newCron?.intervalMin) || 5),
+    dailyTime: typeof newCron?.dailyTime === 'string' ? newCron.dailyTime : '09:00',
+  };
   
-  if (!newCron.id) {
-    newCron.id = `cron-${Date.now()}`;
-    newCron.lastRun = Date.now();
-    newCron.active = true;
+  if (!normalized.id) {
+    normalized.id = `cron-${Date.now()}`;
+    normalized.lastRun = 0;
+    normalized.active = true;
   }
   
-  crons.push(newCron);
+  crons.push(normalized);
   await saveCrons(crons);
-  return NextResponse.json({ success: true, cron: newCron });
+  return NextResponse.json({ success: true, cron: normalized });
 }
 
 export async function DELETE(req: Request) {
@@ -49,7 +56,16 @@ export async function DELETE(req: Request) {
 export async function PUT(req: Request) {
   const updates = await req.json();
   let crons = await getCrons();
-  crons = crons.map((c: any) => c.id === updates.id ? { ...c, ...updates } : c);
+  crons = crons.map((c: any) => {
+    if (c.id !== updates.id) return c;
+    const merged = { ...c, ...updates };
+    return {
+      ...merged,
+      scheduleType: merged?.scheduleType === 'daily' ? 'daily' : 'interval',
+      intervalMin: Math.max(1, Number(merged?.intervalMin) || 5),
+      dailyTime: typeof merged?.dailyTime === 'string' ? merged.dailyTime : '09:00',
+    };
+  });
   await saveCrons(crons);
   return NextResponse.json({ success: true });
 }

@@ -22,14 +22,6 @@ type GroupTimelineMessage = {
   meta?: Record<string, unknown>;
 };
 
-type AgentCapabilities = {
-  read: boolean;
-  write: boolean;
-  exec: boolean;
-  invite: boolean;
-  skills: boolean;
-};
-
 type OpenClawAgent = {
   id: string;
   name?: string;
@@ -74,7 +66,7 @@ type SessionStoreEntry = {
   origin: OriginContext;
   sessionFile: string;
   compactionCount: number;
-  capabilities: AgentCapabilities;
+  toolsAlsoAllow: string[];
   workspaceDir: string;
   skillsSnapshot: {
     enabledSkills: string[];
@@ -84,7 +76,6 @@ type SessionStoreEntry = {
 
 type SessionStore = Record<string, SessionStoreEntry>;
 
-const DEFAULT_CAPABILITIES: AgentCapabilities = { read: true, write: true, exec: false, invite: false, skills: true };
 const CLAWCHATING_SKILLS = ['clawchating-read', 'clawchating-write', 'clawchating-exec', 'clawchating-invite', 'openclaw-native-skills'];
 
 function sanitizePeerId(value: string | undefined) {
@@ -93,15 +84,9 @@ function sanitizePeerId(value: string | undefined) {
   return v.replace(/[^a-zA-Z0-9_-]/g, '_');
 }
 
-function getCapabilitiesFromTools(alsoAllow: string[] | undefined): AgentCapabilities {
-  const list = alsoAllow || [];
-  return {
-    read: list.includes('read'),
-    write: list.includes('write') || list.includes('edit') || list.includes('apply_patch'),
-    exec: list.includes('exec') || list.includes('process'),
-    invite: list.includes('subagents') || list.includes('agents_list'),
-    skills: list.includes('skills'),
-  };
+function normalizeToolList(alsoAllow: string[] | undefined) {
+  if (!Array.isArray(alsoAllow)) return [] as string[];
+  return Array.from(new Set(alsoAllow.map((item) => String(item || '').trim()).filter(Boolean)));
 }
 
 async function readJsonFile<T>(filePath: string, fallback: T): Promise<T> {
@@ -122,12 +107,12 @@ async function getAgentProfile(agentId: string) {
   const config = await loadOpenClawConfig();
   const list = Array.isArray(config.agents?.list) ? config.agents?.list : [];
   const found = list.find((a) => a.id === agentId);
-  const capabilities = found ? getCapabilitiesFromTools(found.tools?.alsoAllow) : DEFAULT_CAPABILITIES;
+  const toolsAlsoAllow = normalizeToolList(found?.tools?.alsoAllow);
   return {
     agentId,
     displayName: found?.name || agentId,
     workspaceDir: found?.workspace || path.join(process.cwd(), 'workspaces', 'default-workspace'),
-    capabilities,
+    toolsAlsoAllow,
   };
 }
 
@@ -265,7 +250,7 @@ export async function ensureAgentSession(params: {
     },
     sessionFile,
     compactionCount: existing?.compactionCount || 0,
-    capabilities: profile.capabilities,
+    toolsAlsoAllow: profile.toolsAlsoAllow,
     workspaceDir: profile.workspaceDir,
     skillsSnapshot: {
       enabledSkills: CLAWCHATING_SKILLS,
@@ -326,18 +311,29 @@ export async function loadSessionMessages(params: {
   agentId: string;
   sessionKey: string;
   limit?: number;
+  offset?: number;
 }) {
-  const { agentId, sessionKey, limit = 30 } = params;
+  const { agentId, sessionKey, limit = 30, offset = 0 } = params;
   const store = await readJsonFile<SessionStore>(getSessionsStorePath(agentId), {} as SessionStore);
   const entry = store[sessionKey];
-  if (!entry?.sessionId) return [] as SessionMessage[];
+  if (!entry?.sessionId) {
+    return {
+      messages: [] as SessionMessage[],
+      total: 0,
+      hasMore: false,
+    };
+  }
 
   const sessionFile = path.join(getAgentSessionsDir(agentId), `${entry.sessionId}.jsonl`);
   let content = '';
   try {
     content = await fs.readFile(sessionFile, 'utf-8');
   } catch {
-    return [] as SessionMessage[];
+    return {
+      messages: [] as SessionMessage[],
+      total: 0,
+      hasMore: false,
+    };
   }
 
   const rows = content
@@ -358,7 +354,7 @@ export async function loadSessionMessages(params: {
       message: { role: SessionMessageRole; content?: unknown; timestamp?: number; name?: string };
     }>;
 
-  return rows
+  const normalizedRows = rows
     .map((row) => ({
       id: randomUUID().slice(0, 8),
       role: row.message.role,
@@ -366,8 +362,21 @@ export async function loadSessionMessages(params: {
       timestamp: row.message.timestamp || Date.now(),
       ...(row.message.name ? { name: row.message.name } : {}),
     }))
-    .filter((row) => row.content)
-    .slice(-limit);
+    .filter((row) => row.content);
+
+  const total = normalizedRows.length;
+  const safeOffset = Math.max(0, Math.floor(offset));
+  const safeLimit = Math.max(1, Math.floor(limit));
+  const end = Math.max(0, total - safeOffset);
+  const start = Math.max(0, end - safeLimit);
+  const messages = normalizedRows.slice(start, end);
+  const hasMore = start > 0;
+
+  return {
+    messages,
+    total,
+    hasMore,
+  };
 }
 
 export async function appendGroupTimelineMessage(params: {
@@ -404,16 +413,27 @@ export async function loadGroupTimelineMessages(params: {
   groupId: string;
   channelId: string;
   limit?: number;
+  offset?: number;
 }) {
-  const { groupId, channelId, limit = 120 } = params;
-  if (!groupId) return [] as GroupTimelineMessage[];
+  const { groupId, channelId, limit = 120, offset = 0 } = params;
+  if (!groupId) {
+    return {
+      messages: [] as GroupTimelineMessage[],
+      total: 0,
+      hasMore: false,
+    };
+  }
 
   const timelinePath = getGroupTimelineFilePath(groupId, channelId || 'default');
   let content = '';
   try {
     content = await fs.readFile(timelinePath, 'utf-8');
   } catch {
-    return [] as GroupTimelineMessage[];
+    return {
+      messages: [] as GroupTimelineMessage[],
+      total: 0,
+      hasMore: false,
+    };
   }
 
   const rows = content
@@ -446,7 +466,7 @@ export async function loadGroupTimelineMessages(params: {
       };
     }>;
 
-  return rows
+  const normalizedRows = rows
     .map((row) => ({
       id: randomUUID().slice(0, 8),
       role: row.message.role,
@@ -455,8 +475,21 @@ export async function loadGroupTimelineMessages(params: {
       ...(row.message.name ? { name: row.message.name } : {}),
       ...(row.message.meta ? { meta: row.message.meta } : {}),
     }))
-    .filter((row) => row.content)
-    .slice(-limit);
+    .filter((row) => row.content);
+
+  const total = normalizedRows.length;
+  const safeOffset = Math.max(0, Math.floor(offset));
+  const safeLimit = Math.max(1, Math.floor(limit));
+  const end = Math.max(0, total - safeOffset);
+  const start = Math.max(0, end - safeLimit);
+  const messages = normalizedRows.slice(start, end);
+  const hasMore = start > 0;
+
+  return {
+    messages,
+    total,
+    hasMore,
+  };
 }
 
 export async function initializeGroupSessions(params: {

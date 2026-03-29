@@ -212,7 +212,7 @@ export function Sidebar({
                   <button 
                     onClick={(e) => { e.stopPropagation(); setConfigAgentId(agent.id); }}
                     className="p-1 hover:bg-neutral-700 rounded text-neutral-500 hover:text-indigo-400 transition-colors opacity-0 group-hover:opacity-100"
-                    title="配置能力"
+                    title="配置工具权限"
                   >
                     <Settings className="w-3.5 h-3.5" />
                   </button>

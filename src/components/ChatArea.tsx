@@ -1,4 +1,4 @@
-import { User, Send, Terminal, AtSign, FolderClosed, Plus, Clock, FileText, X } from 'lucide-react';
+import { User, Send, Terminal, AtSign, FolderClosed, Plus, Clock, FileText, X, RefreshCw } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { Agent, Group, SessionType, CronTask, WorkspaceEntry } from '../lib/types';
 import ReactMarkdown from 'react-markdown';
@@ -18,6 +18,11 @@ interface ChatAreaProps {
   setIsCronModalOpen: (v: boolean) => void;
   crons: CronTask[];
   messages: any[];
+  hasMoreHistory: boolean;
+  isLoadingHistory: boolean;
+  isRefreshingMessages: boolean;
+  onLoadHistoryMessages: () => void;
+  onRefreshMessages: () => void;
   isLoading: boolean;
   mentionedAgentId?: string;
   renderUserTextWithMentions: (content: string) => React.ReactNode;
@@ -36,12 +41,15 @@ interface ChatAreaProps {
   onSetLeader: (agentId: string) => void;
   onRemoveAgent: (agentId: string) => void;
   onDeleteGroup: () => void;
+  onRecoverMessage: (messageId: string, agentId: string) => Promise<boolean>;
 }
 
 export function ChatArea({
-  activeSession, agents, currentGroup, activeAgentInfo, activeChannelId, setConfigAgentId, fetchGroups, isWorkspaceOpen, setIsWorkspaceOpen, setIsCronModalOpen, crons, messages, isLoading, mentionedAgentId, renderUserTextWithMentions, messagesEndRef, workspaceFiles, openFile, viewingFile, setViewingFile, mentionMenu, insertMention, proxyHandleSubmit, textareaRef, input, handleInputTextChange, onAddAgent, onSetLeader, onRemoveAgent, onDeleteGroup
+  activeSession, agents, currentGroup, activeAgentInfo, activeChannelId, setConfigAgentId, fetchGroups, isWorkspaceOpen, setIsWorkspaceOpen, setIsCronModalOpen, crons, messages, hasMoreHistory, isLoadingHistory, isRefreshingMessages, onLoadHistoryMessages, onRefreshMessages, isLoading, mentionedAgentId, renderUserTextWithMentions, messagesEndRef, workspaceFiles, openFile, viewingFile, setViewingFile, mentionMenu, insertMention, proxyHandleSubmit, textareaRef, input, handleInputTextChange, onAddAgent, onSetLeader, onRemoveAgent, onDeleteGroup, onRecoverMessage
 }: ChatAreaProps) {
   const ActiveIcon = activeAgentInfo.icon;
+  const [recoveringId, setRecoveringId] = React.useState<string | null>(null);
+
   const isLocalUserMessage = (message: any) => {
     if (message.role !== 'user') return false;
     if (activeSession.type !== 'group') return true;
@@ -58,7 +66,7 @@ export function ChatArea({
           <button 
             onClick={() => activeSession.type === 'agent' && setConfigAgentId(activeSession.id)}
             className={cn("p-1.5 -ml-1.5 rounded-lg transition-colors", activeSession.type === 'agent' ? "hover:bg-neutral-800 cursor-pointer" : "cursor-default")}
-            title={activeSession.type === 'agent' ? "配置能力" : undefined}
+            title={activeSession.type === 'agent' ? "配置工具权限" : undefined}
           >
             <ActiveIcon className={activeSession.type === 'group' ? "w-5 h-5 text-orange-500" : cn("w-5 h-5", activeAgentInfo.color)} />
           </button>
@@ -110,6 +118,19 @@ export function ChatArea({
         
         {/* Main Chat Flow */}
         <main className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-6 flex flex-col">
+          {messages.length > 0 && hasMoreHistory ? (
+            <div className="max-w-4xl mx-auto w-full flex justify-center">
+              <button
+                type="button"
+                onClick={onLoadHistoryMessages}
+                disabled={isLoadingHistory}
+                className="text-xs px-3 py-1.5 rounded-full border border-neutral-700 text-neutral-300 hover:bg-neutral-800 disabled:opacity-60"
+              >
+                {isLoadingHistory ? '加载中...' : '查看历史消息'}
+              </button>
+            </div>
+          ) : null}
+
           {messages.length === 0 ? (
             <div className="flex-1 flex flex-col items-center justify-center text-neutral-500 gap-4">
               <div className="p-6 rounded-3xl bg-neutral-800/30 border border-neutral-800 border-dashed animate-pulse relative">
@@ -185,6 +206,31 @@ export function ChatArea({
                              <div className="text-neutral-500">{JSON.stringify(tool.args)}</div>
                            </div>
                         ))}
+                        {m.meta?.executionState && (m.meta.executionState === 'failed_visible' || m.meta.executionState === 'failed_timeout') && (
+                          <div className="mt-3 pt-3 border-t border-neutral-700/50 flex items-center justify-between gap-4">
+                            <span className="text-xs text-orange-400/80 font-mono truncate">
+                               ⚠️ Execution interrupted. Check backend session?
+                            </span>
+                            <button
+                              onClick={() => {
+                                 setRecoveringId(m.id);
+                                 const agentName = m.name || activeAgentInfo.id;
+                                 onRecoverMessage(m.id, agentName).finally(() => setRecoveringId(null));
+                              }}
+                              disabled={recoveringId === m.id}
+                              className="shrink-0 text-[10px] px-2 py-1 rounded bg-neutral-800/80 hover:bg-neutral-700 text-emerald-400 border border-emerald-500/20 hover:border-emerald-500/50 flex items-center gap-1.5 transition-all disabled:opacity-50"
+                              title="Attempt to find a completed reply from the agent's main session history"
+                            >
+                              <RefreshCw className={cn("w-3 h-3", recoveringId === m.id && "animate-spin")} />
+                              {recoveringId === m.id ? 'Scanning...' : 'Recover Reply'}
+                            </button>
+                          </div>
+                        )}
+                        {m.meta?.recovered && (
+                          <div className="mt-2 text-[10px] text-emerald-500/60 font-mono flex items-center gap-1">
+                            <RefreshCw className="w-3 h-3" /> Recovered from session: {m.meta.recoveredFromSession || 'main'}
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
@@ -293,6 +339,15 @@ export function ChatArea({
               style={{ height: 'auto' }}
             />
             <button
+              type="button"
+              onClick={onRefreshMessages}
+              disabled={isRefreshingMessages}
+              className="p-3 bg-neutral-800 text-neutral-300 rounded-xl hover:bg-neutral-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all shrink-0 mb-0.5 shadow-sm"
+              title="刷新聊天状态"
+            >
+              <RefreshCw className={cn("w-5 h-5", isRefreshingMessages ? 'animate-spin' : '')} />
+            </button>
+            <button
               type="submit"
               disabled={isLoading || !input.trim()}
               className="p-3 bg-indigo-600 text-white rounded-xl hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed transition-all shrink-0 mb-0.5 shadow-sm"
@@ -302,8 +357,8 @@ export function ChatArea({
           </form>
           <div className="flex justify-between items-center mt-3 px-1 text-xs text-neutral-500">
             <div className="flex items-center gap-4">
-              <span className="flex items-center gap-1 hover:text-neutral-300 transition-colors cursor-pointer" title="Available tools: read_file, write_file, list_files, execute_command">
-                <Terminal className="w-3 h-3" /> Tools Enabled: fs (Read/Write) & exec
+              <span className="flex items-center gap-1 hover:text-neutral-300 transition-colors cursor-pointer" title="权限由 OpenClaw tools.alsoAllow 原生控制">
+                <Terminal className="w-3 h-3" /> Tools 权限：OpenClaw Native
               </span>
               <span className="flex items-center gap-1 text-emerald-500/80">
                 <FolderClosed className="w-3 h-3" /> 工作区隔离域就绪
