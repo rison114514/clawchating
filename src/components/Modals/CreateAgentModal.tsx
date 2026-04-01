@@ -142,6 +142,11 @@ export function CreateAgentModal({
                 </option>
               ))}
             </select>
+            <div className="text-[11px] text-neutral-500 mt-1">
+              {isLoadingModels
+                ? '正在同步最新模型列表...'
+                : `可选模型 ${modelOptions.length} 个（打开弹窗会自动刷新）`}
+            </div>
           </div>
 
           <div>

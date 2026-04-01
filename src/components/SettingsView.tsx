@@ -11,6 +11,7 @@ type OpenClawModelConfig = {
   fallbacks: string[];
   imageFallbacks: string[];
   allowed: string[];
+  agentModels: Record<string, string>;
   authProviders: Array<{ provider: string; effectiveKind: string; effectiveDetail: string }>;
 };
 
@@ -58,6 +59,7 @@ interface SettingsViewProps {
     fallbacks: string[];
     imageFallbacks: string[];
     allowed: string[];
+    agentModels: Record<string, string>;
   }) => Promise<void>;
   saveOpenClawProviderAuth: (payload: {
     provider: string;
@@ -112,6 +114,7 @@ export function SettingsView({
   const [draftFallbacksText, setDraftFallbacksText] = useState('');
   const [draftImageFallbacksText, setDraftImageFallbacksText] = useState('');
   const [draftAllowedModels, setDraftAllowedModels] = useState<string[]>([]);
+  const [draftAgentModels, setDraftAgentModels] = useState<Record<string, string>>({});
   const [selectedProvider, setSelectedProvider] = useState('');
   const [providerApiKey, setProviderApiKey] = useState('');
   const [providerProfileId, setProviderProfileId] = useState('');
@@ -125,6 +128,24 @@ export function SettingsView({
   const [wizardPollTick, setWizardPollTick] = useState(0);
   const [customToolInput, setCustomToolInput] = useState('');
   const [isRegisteringChannel, setIsRegisteringChannel] = useState(false);
+  const [isReloadingAgentModels, setIsReloadingAgentModels] = useState(false);
+  const [agentModelsReloadedAt, setAgentModelsReloadedAt] = useState<number | null>(null);
+
+  const buildCurrentAgentModelMap = useCallback(() => {
+    const fromStatus = openClawModelConfig?.agentModels || {};
+    const result: Record<string, string> = {};
+
+    for (const item of agents) {
+      const agentId = String(item.id || '').trim();
+      if (!agentId) continue;
+      const modelFromStatus = String(fromStatus[agentId] || '').trim();
+      const modelFromAgent = String(item.model || '').trim();
+      const model = modelFromStatus || modelFromAgent;
+      if (model) result[agentId] = model;
+    }
+
+    return result;
+  }, [agents, openClawModelConfig]);
 
   const TOOL_SECTION_LABELS: Record<string, string> = {
     fs: 'Files',
@@ -197,6 +218,18 @@ export function SettingsView({
     setCustomToolInput('');
   };
 
+  const handleReloadCurrentAgentModels = async () => {
+    setIsReloadingAgentModels(true);
+    try {
+      await refreshOpenClawModelConfig();
+      setAgentModelsReloadedAt(Date.now());
+    } catch (error) {
+      alert(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsReloadingAgentModels(false);
+    }
+  };
+
   useEffect(() => {
     if (!openClawModelConfig) return;
     setDraftDefaultModel(openClawModelConfig.defaultModel || '');
@@ -204,7 +237,8 @@ export function SettingsView({
     setDraftFallbacksText((openClawModelConfig.fallbacks || []).join('\n'));
     setDraftImageFallbacksText((openClawModelConfig.imageFallbacks || []).join('\n'));
     setDraftAllowedModels(openClawModelConfig.allowed || []);
-  }, [openClawModelConfig]);
+    setDraftAgentModels(buildCurrentAgentModelMap());
+  }, [openClawModelConfig, buildCurrentAgentModelMap]);
 
   useEffect(() => {
     if (!openClawProviders.length) {
@@ -383,6 +417,24 @@ export function SettingsView({
       fallbacks: normalizeLines(draftFallbacksText),
       imageFallbacks: normalizeLines(draftImageFallbacksText),
       allowed: Array.from(new Set(draftAllowedModels.map((item) => item.trim()).filter(Boolean))),
+      agentModels: Object.fromEntries(
+        Object.entries(draftAgentModels)
+          .map(([agentId, model]) => [agentId, String(model || '').trim()])
+          .filter(([agentId, model]) => !!agentId && !!model)
+      ),
+    });
+  };
+
+  const setAgentModel = (agentId: string, model: string) => {
+    setDraftAgentModels((current) => {
+      const next = { ...current };
+      const normalized = String(model || '').trim();
+      if (normalized) {
+        next[agentId] = normalized;
+      } else {
+        delete next[agentId];
+      }
+      return next;
     });
   };
 
@@ -851,6 +903,74 @@ export function SettingsView({
                   })}
                   {modelSelectOptions.length === 0 ? (
                     <div className="text-sm text-neutral-500">暂无可用模型列表。</div>
+                  ) : null}
+                </div>
+              </div>
+
+              <div className="rounded-xl border border-neutral-800 bg-neutral-900/50 p-5">
+                <label className="block text-sm text-neutral-300 mb-2">Agent 专属模型（agents.list[].model）</label>
+                <p className="text-xs text-neutral-500 mb-3">为空表示跟随默认模型（primary）。选择后会写入对应 agent 的 model 字段。</p>
+                <div className="mb-3 flex justify-end">
+                  <button
+                    type="button"
+                    onClick={() => handleReloadCurrentAgentModels()}
+                    disabled={isLoadingOpenClawModelConfig || isSavingOpenClawModelConfig || isReloadingAgentModels}
+                    className="px-3 py-1.5 rounded-lg border border-neutral-700 text-xs text-neutral-300 hover:bg-neutral-800 disabled:opacity-60"
+                  >
+                    {isReloadingAgentModels ? '读取中...' : '读取当前已使用模型'}
+                  </button>
+                </div>
+                {agentModelsReloadedAt ? (
+                  <div className="text-[11px] text-neutral-500 mb-3 text-right">
+                    已读取：{new Date(agentModelsReloadedAt).toLocaleTimeString()}
+                  </div>
+                ) : null}
+                <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
+                  {agents.map((item) => {
+                    const currentConfigured = String(item.model || openClawModelConfig?.agentModels?.[item.id] || '').trim();
+                    const draftConfigured = String(draftAgentModels[item.id] || '').trim();
+                    const hasDiff = currentConfigured !== draftConfigured;
+                    const effectiveModel = String(draftAgentModels[item.id] || '').trim() || draftDefaultModel || '未设置';
+                    const isFollowingDefault = !String(draftAgentModels[item.id] || '').trim();
+                    return (
+                    <div
+                      key={item.id}
+                      className={cn(
+                        'rounded-lg border bg-neutral-950/70 px-3 py-2',
+                        hasDiff ? 'border-amber-500/60 shadow-[0_0_0_1px_rgba(245,158,11,0.25)]' : 'border-neutral-800'
+                      )}
+                    >
+                      <div className="text-xs text-neutral-500 mb-1 flex items-center justify-between gap-3">
+                        <span>{item.name} · {item.id}</span>
+                        {hasDiff ? (
+                          <span className="inline-flex items-center rounded-md border border-amber-400/40 bg-amber-500/10 px-2 py-0.5 text-[10px] text-amber-300">
+                            已修改
+                          </span>
+                        ) : null}
+                      </div>
+                      <div className="text-[11px] text-neutral-500 mb-2">
+                        当前配置：{currentConfigured || '跟随默认'} · 当前生效：{currentConfigured || draftDefaultModel || '未设置'}
+                      </div>
+                      <select
+                        value={draftAgentModels[item.id] || ''}
+                        onChange={(e) => setAgentModel(item.id, e.target.value)}
+                        className="w-full rounded-lg bg-neutral-950 border border-neutral-800 px-3 py-2 text-sm text-neutral-200 focus:outline-none focus:border-cyan-500/60"
+                        disabled={isLoadingOpenClawModelConfig || isSavingOpenClawModelConfig}
+                      >
+                        <option value="">跟随默认模型</option>
+                        {modelSelectOptions.map((modelItem) => (
+                          <option key={modelItem.key} value={modelItem.key}>
+                            {modelItem.name ? `${modelItem.name} (${modelItem.key})` : modelItem.key}
+                          </option>
+                        ))}
+                      </select>
+                      <div className="text-[11px] text-neutral-500 mt-2">
+                        编辑后生效预览：{effectiveModel}{isFollowingDefault ? '（跟随默认）' : '（专属模型）'}
+                      </div>
+                    </div>
+                  );})}
+                  {agents.length === 0 ? (
+                    <div className="text-sm text-neutral-500">暂无 Agent。</div>
                   ) : null}
                 </div>
               </div>

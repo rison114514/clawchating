@@ -6,6 +6,7 @@ export type Agent = {
   avatarEmoji?: string;
   hasAvatarImage?: boolean;
   isDefault?: boolean;
+  model?: string;
   toolsAlsoAllow: string[];
 };
 

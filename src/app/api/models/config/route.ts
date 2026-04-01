@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { execFile, spawn } from 'child_process';
 import { promisify } from 'util';
 import fs from 'fs/promises';
+import os from 'os';
 import path from 'path';
 
 const execFileAsync = promisify(execFile);
@@ -22,6 +23,19 @@ type OpenClawModelStatus = {
       };
     }>;
   };
+  agentModels?: Record<string, string>;
+};
+
+type OpenClawConfig = {
+  agents?: {
+    list?: Array<{
+      id?: string;
+      model?: string;
+      [key: string]: unknown;
+    }>;
+    [key: string]: unknown;
+  };
+  [key: string]: unknown;
 };
 
 type OpenClawModelListItem = {
@@ -114,6 +128,69 @@ async function runOpenClawConfigSet(path: string, value: unknown) {
   );
 }
 
+function normalizeAgentModels(raw: unknown) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return {} as Record<string, string>;
+  }
+
+  return Object.fromEntries(
+    Object.entries(raw as Record<string, unknown>)
+      .map(([agentId, model]) => [String(agentId).trim(), String(model || '').trim()])
+      .filter(([agentId, model]) => !!agentId && !!model)
+  );
+}
+
+async function loadOpenClawConfig() {
+  const configPath = path.join(os.homedir(), '.openclaw', 'openclaw.json');
+  try {
+    const content = await fs.readFile(configPath, 'utf-8');
+    return JSON.parse(content) as OpenClawConfig;
+  } catch {
+    return null;
+  }
+}
+
+async function loadAgentModelMapFromConfig() {
+  const config = await loadOpenClawConfig();
+  const list = Array.isArray(config?.agents?.list) ? config!.agents!.list! : [];
+  const agentModels: Record<string, string> = {};
+
+  for (const agent of list) {
+    const id = String(agent?.id || '').trim();
+    const model = String(agent?.model || '').trim();
+    if (id && model) {
+      agentModels[id] = model;
+    }
+  }
+
+  return agentModels;
+}
+
+async function applyAgentModelOverrides(agentModels: Record<string, string>) {
+  const configPath = path.join(os.homedir(), '.openclaw', 'openclaw.json');
+  const config = await loadOpenClawConfig();
+  if (!config || !Array.isArray(config.agents?.list)) return;
+
+  const nextList = config.agents!.list!.map((agent) => {
+    const id = String(agent?.id || '').trim();
+    if (!id || !Object.prototype.hasOwnProperty.call(agentModels, id)) {
+      return agent;
+    }
+
+    const model = String(agentModels[id] || '').trim();
+    if (model) {
+      return { ...agent, model };
+    }
+
+    const nextAgent = { ...agent };
+    delete nextAgent.model;
+    return nextAgent;
+  });
+
+  config.agents!.list = nextList;
+  await fs.writeFile(configPath, JSON.stringify(config, null, 2), 'utf-8');
+}
+
 function normalizeModelList(raw: unknown) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return [] as OpenClawModelListItem[];
   const modelsRaw = Array.isArray((raw as Record<string, unknown>).models)
@@ -171,6 +248,7 @@ function normalizeModelStatus(raw: unknown) {
       : [],
     allowed: Array.isArray(status.allowed) ? status.allowed.map((item) => String(item)).filter(Boolean) : [],
     authProviders,
+    agentModels: normalizeAgentModels(status.agentModels),
   };
 }
 
@@ -294,16 +372,21 @@ async function runOpenClawAuthPasteToken(params: {
 
 export async function GET() {
   try {
-    const [statusRaw, listRaw, providerChoices] = await Promise.all([
+    const [statusRaw, listRaw, providerChoices, agentModels] = await Promise.all([
       runOpenClawJson(['models', 'status', '--json'], 30000),
       runOpenClawJson(['models', 'list', '--json'], 30000),
       loadProviderChoicesFromOpenClawDist(),
+      loadAgentModelMapFromConfig(),
     ]);
 
     const models = normalizeModelList(listRaw);
+    const status = normalizeModelStatus(statusRaw);
 
     return NextResponse.json({
-      status: normalizeModelStatus(statusRaw),
+      status: {
+        ...status,
+        agentModels,
+      },
       models,
       providers: providerChoices,
     });
@@ -322,6 +405,7 @@ export async function POST(req: Request) {
       fallbacks?: string[];
       imageFallbacks?: string[];
       allowed?: string[];
+      agentModels?: Record<string, string>;
       provider?: string;
       apiKey?: string;
       profileId?: string;
@@ -382,10 +466,19 @@ export async function POST(req: Request) {
 
     await runOpenClawConfigSet('agents.defaults.models', allowedMap);
 
+    const nextAgentModels = normalizeAgentModels(body.agentModels);
+    if (Object.keys(nextAgentModels).length > 0 || typeof body.agentModels === 'object') {
+      await applyAgentModelOverrides(nextAgentModels);
+    }
+
     const statusRaw = await runOpenClawJson(['models', 'status', '--json'], 30000);
+    const agentModels = await loadAgentModelMapFromConfig();
     return NextResponse.json({
       success: true,
-      status: normalizeModelStatus(statusRaw),
+      status: {
+        ...normalizeModelStatus(statusRaw),
+        agentModels,
+      },
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

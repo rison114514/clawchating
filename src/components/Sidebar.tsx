@@ -10,6 +10,7 @@ interface SidebarProps {
   groups: Group[];
   modelOptions: Array<{ key: string; name?: string }>;
   isLoadingModelOptions: boolean;
+  refreshModelOptions: () => Promise<void>;
   activeSession: SessionType;
   setActiveSession: (s: SessionType) => void;
   globalChannelId: string;
@@ -35,6 +36,7 @@ export function Sidebar({
   groups,
   modelOptions,
   isLoadingModelOptions,
+  refreshModelOptions,
   activeSession,
   setActiveSession,
   globalChannelId,
@@ -225,7 +227,10 @@ export function Sidebar({
           </div>
 
           <button
-            onClick={() => setIsCreatingAgent(true)}
+            onClick={() => {
+              setIsCreatingAgent(true);
+              refreshModelOptions().catch(console.error);
+            }}
             className="mt-2 w-full border border-dashed border-neutral-700 hover:border-indigo-500/60 rounded-lg px-3 py-2 text-sm text-neutral-400 hover:text-indigo-300 transition-colors flex items-center justify-center gap-2"
             title="新增 Agent"
           >

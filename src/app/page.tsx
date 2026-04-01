@@ -21,6 +21,7 @@ type OpenClawModelConfig = {
   fallbacks: string[];
   imageFallbacks: string[];
   allowed: string[];
+  agentModels: Record<string, string>;
   authProviders: Array<{ provider: string; effectiveKind: string; effectiveDetail: string }>;
 };
 
@@ -447,6 +448,7 @@ export default function Chat() {
           avatarEmoji: typeof a.avatarEmoji === 'string' ? a.avatarEmoji : undefined,
           hasAvatarImage: !!a.hasAvatarImage,
           isDefault: !!a.isDefault,
+          model: typeof a.model === 'string' ? a.model : undefined,
           toolsAlsoAllow: Array.isArray(a?.toolsAlsoAllow)
             ? a.toolsAlsoAllow.map((item: unknown) => String(item)).filter(Boolean)
             : [],
@@ -514,6 +516,13 @@ export default function Chat() {
         fallbacks: Array.isArray(status?.fallbacks) ? status.fallbacks.map((item: unknown) => String(item)) : [],
         imageFallbacks: Array.isArray(status?.imageFallbacks) ? status.imageFallbacks.map((item: unknown) => String(item)) : [],
         allowed: Array.isArray(status?.allowed) ? status.allowed.map((item: unknown) => String(item)) : [],
+        agentModels: status?.agentModels && typeof status.agentModels === 'object' && !Array.isArray(status.agentModels)
+          ? Object.fromEntries(
+              Object.entries(status.agentModels as Record<string, unknown>)
+                .map(([agentId, model]) => [String(agentId), String(model || '').trim()])
+                .filter(([agentId, model]) => !!agentId && !!model)
+            )
+          : {},
         authProviders: Array.isArray(status?.authProviders)
           ? status.authProviders.map((provider: any) => ({
               provider: String(provider?.provider || ''),
@@ -551,6 +560,7 @@ export default function Chat() {
     fallbacks: string[];
     imageFallbacks: string[];
     allowed: string[];
+    agentModels: Record<string, string>;
   }) => {
     setIsSavingOpenClawModelConfig(true);
     try {
@@ -1051,6 +1061,7 @@ export default function Chat() {
         groups={groups}
         modelOptions={modelOptions}
         isLoadingModelOptions={isLoadingModelOptions}
+        refreshModelOptions={fetchModelOptions}
         activeSession={activeSession}
         setActiveSession={setActiveSession}
         globalChannelId={globalChannelId}

@@ -28,7 +28,22 @@ type OpenClawConfig = {
     [key: string]: unknown;
   };
   agents?: {
+    defaults?: {
+      models?: Record<string, unknown>;
+      [key: string]: unknown;
+    };
     list?: OpenClawAgent[];
+    [key: string]: unknown;
+  };
+  models?: {
+    providers?: Record<string, {
+      models?: Array<{
+        id?: string;
+        name?: string;
+        [key: string]: unknown;
+      }>;
+      [key: string]: unknown;
+    }>;
     [key: string]: unknown;
   };
   [key: string]: unknown;
@@ -208,10 +223,87 @@ async function loadAvailableModels() {
             : [],
         } as OpenClawModelSummary;
       })
-      .filter((model) => model.key && model.available);
+      .filter((model) => model.key);
   } catch {
     return [] as OpenClawModelSummary[];
   }
+}
+
+function loadModelsFromConfig(config: OpenClawConfig) {
+  const result: OpenClawModelSummary[] = [];
+
+  const providers = config.models?.providers;
+  if (providers && typeof providers === 'object' && !Array.isArray(providers)) {
+    for (const [providerKey, providerValue] of Object.entries(providers)) {
+      const providerModels = Array.isArray(providerValue?.models) ? providerValue.models : [];
+      for (const item of providerModels) {
+        const modelId = String(item?.id || '').trim();
+        if (!modelId) continue;
+        result.push({
+          key: `${providerKey}/${modelId}`,
+          name: typeof item?.name === 'string' ? item.name : modelId,
+          available: true,
+          tags: ['config'],
+        });
+      }
+    }
+  }
+
+  const allowedMap = config.agents?.defaults?.models;
+  if (allowedMap && typeof allowedMap === 'object' && !Array.isArray(allowedMap)) {
+    for (const modelKey of Object.keys(allowedMap)) {
+      const key = String(modelKey || '').trim();
+      if (!key) continue;
+      result.push({
+        key,
+        name: key,
+        available: true,
+        tags: ['allowed'],
+      });
+    }
+  }
+
+  const agentList = Array.isArray(config.agents?.list) ? config.agents!.list! : [];
+  for (const agent of agentList) {
+    const key = String(agent?.model || '').trim();
+    if (!key) continue;
+    result.push({
+      key,
+      name: key,
+      available: true,
+      tags: ['agent-model'],
+    });
+  }
+
+  return result;
+}
+
+function mergeModelSummaries(primary: OpenClawModelSummary[], secondary: OpenClawModelSummary[]) {
+  const merged = new Map<string, OpenClawModelSummary>();
+
+  for (const item of [...secondary, ...primary]) {
+    if (!item.key) continue;
+    const existing = merged.get(item.key);
+    if (!existing) {
+      merged.set(item.key, {
+        ...item,
+        tags: Array.isArray(item.tags) ? Array.from(new Set(item.tags)) : [],
+      });
+      continue;
+    }
+
+    merged.set(item.key, {
+      key: existing.key,
+      name: existing.name || item.name,
+      input: existing.input || item.input,
+      contextWindow: existing.contextWindow || item.contextWindow,
+      available: existing.available || item.available,
+      local: typeof existing.local === 'boolean' ? existing.local : item.local,
+      tags: Array.from(new Set([...(existing.tags || []), ...(item.tags || [])])),
+    });
+  }
+
+  return Array.from(merged.values()).sort((a, b) => a.key.localeCompare(b.key));
 }
 
 function setDefaultAgentsInConfig(config: OpenClawConfig, targetIds: string[]) {
@@ -260,13 +352,19 @@ export async function GET(req: Request) {
   try {
     const { searchParams } = new URL(req.url);
     const requestedResource = (searchParams.get('resource') || searchParams.get('type') || '').trim();
+    const homedir = os.homedir();
+    const configPath = path.join(homedir, '.openclaw', 'openclaw.json');
+
     if (requestedResource === 'models') {
-      const models = await loadAvailableModels();
+      const cliModels = await loadAvailableModels();
+      const config = fs.existsSync(configPath)
+        ? (JSON.parse(fs.readFileSync(configPath, 'utf8')) as OpenClawConfig)
+        : ({} as OpenClawConfig);
+      const configModels = loadModelsFromConfig(config);
+      const models = mergeModelSummaries(cliModels, configModels);
       return NextResponse.json({ models });
     }
 
-    const homedir = os.homedir();
-    const configPath = path.join(homedir, '.openclaw', 'openclaw.json');
     if (!fs.existsSync(configPath)) {
       return NextResponse.json({ agents: [] });
     }
@@ -317,6 +415,7 @@ export async function GET(req: Request) {
         avatarEmoji: avatarEmoji || undefined,
         hasAvatarImage: !!avatarPath,
         isDefault,
+        model: typeof configAgent?.model === 'string' ? configAgent.model : undefined,
         toolsAlsoAllow: normalizeToolList(configAgent?.tools?.alsoAllow),
       };
     });
@@ -331,6 +430,7 @@ export async function GET(req: Request) {
         avatarEmoji: undefined,
         hasAvatarImage: false,
         isDefault: true,
+        model: undefined,
         toolsAlsoAllow: [],
       });
     }
@@ -353,6 +453,7 @@ export async function GET(req: Request) {
           avatarEmoji: undefined,
           hasAvatarImage: false,
           isDefault: true,
+          model: undefined,
           toolsAlsoAllow: [],
         }],
         availableTools: CORE_TOOL_IDS,
