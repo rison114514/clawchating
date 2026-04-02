@@ -1,0 +1,9 @@
+{
+  "id": "clawchating-channel",
+  "channels": ["clawchating"],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}

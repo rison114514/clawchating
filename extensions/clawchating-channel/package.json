@@ -1,0 +1,16 @@
+{
+  "name": "clawchating-channel",
+  "version": "0.1.0",
+  "description": "OpenClaw channel plugin for Clawchating timeline delivery",
+  "type": "module",
+  "main": "dist/index.js",
+  "files": [
+    "dist/",
+    "openclaw.plugin.json"
+  ],
+  "openclaw": {
+    "extensions": [
+      "./dist/index.js"
+    ]
+  }
+}

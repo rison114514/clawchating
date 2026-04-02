@@ -7,9 +7,13 @@ import { spawn } from 'child_process';
 const OPENCLAW_HOME = path.join(os.homedir(), '.openclaw');
 const CONFIG_PATH = path.join(OPENCLAW_HOME, 'openclaw.json');
 const PLUGIN_ID = 'clawchating-channel';
+const SCRIPT_DIR = path.dirname(new URL(import.meta.url).pathname);
+const REPO_ROOT = path.resolve(SCRIPT_DIR, '..');
 
 const DEFAULT_PLUGIN_SPEC_CANDIDATES = [
   process.env.CLAWCHATING_CHANNEL_PLUGIN_SPEC,
+  path.join(REPO_ROOT, 'extensions', 'clawchating-channel'),
+  path.join(REPO_ROOT, 'plugins', 'clawchating-channel'),
   path.join(process.cwd(), 'extensions', 'clawchating-channel'),
   path.join(process.cwd(), 'plugins', 'clawchating-channel'),
   '@openclaw/clawchating-channel',
@@ -40,6 +44,47 @@ function runCommand(command, args, cwd = process.cwd()) {
   });
 }
 
+function parseJsonFromMixedOutput(stdout = '', stderr = '') {
+  const directCandidates = [String(stdout || '').trim(), String(stderr || '').trim()].filter(Boolean);
+  for (const candidate of directCandidates) {
+    try {
+      return JSON.parse(candidate);
+    } catch {
+      // continue
+    }
+  }
+
+  const extractFromLines = (text) => {
+    const lines = String(text || '').split('\n');
+    const startIndex = lines.findIndex((line) => {
+      const trimmed = line.trim();
+      return (
+        trimmed === '{' ||
+        trimmed === '[' ||
+        trimmed.startsWith('{"') ||
+        trimmed.startsWith('[{') ||
+        trimmed.startsWith('["')
+      );
+    });
+
+    if (startIndex === -1) return null;
+    const candidateLines = lines.slice(startIndex);
+    for (let end = candidateLines.length; end > 0; end--) {
+      const candidate = candidateLines.slice(0, end).join('\n').trim();
+      if (!candidate) continue;
+      try {
+        return JSON.parse(candidate);
+      } catch {
+        // continue trimming tail lines
+      }
+    }
+
+    return null;
+  };
+
+  return extractFromLines(stdout) || extractFromLines(stderr);
+}
+
 async function pathExists(targetPath) {
   try {
     await fs.access(targetPath);
@@ -52,9 +97,7 @@ async function pathExists(targetPath) {
 async function parseJsonOutput(command, args) {
   try {
     const { stdout, stderr } = await runCommand(command, args, process.cwd());
-    const text = stdout.trim() || stderr.trim();
-    if (!text) return null;
-    return JSON.parse(text);
+    return parseJsonFromMixedOutput(stdout, stderr);
   } catch {
     return null;
   }
@@ -93,7 +136,8 @@ async function ensurePluginInstalled() {
   }
 
   const installErrors = [];
-  for (const rawCandidate of DEFAULT_PLUGIN_SPEC_CANDIDATES) {
+  const uniqueCandidates = Array.from(new Set(DEFAULT_PLUGIN_SPEC_CANDIDATES.map((item) => String(item))));
+  for (const rawCandidate of uniqueCandidates) {
     const candidate = String(rawCandidate || '').trim();
     if (!candidate) continue;
 
@@ -115,6 +159,13 @@ async function ensurePluginInstalled() {
       installErrors.push(`installed ${candidate} but plugin path unresolved`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      if (/plugin already exists/i.test(message)) {
+        const localDefault = path.join(OPENCLAW_HOME, 'extensions', PLUGIN_ID);
+        const manifestPath = path.join(localDefault, 'openclaw.plugin.json');
+        if (await pathExists(manifestPath)) {
+          return { pluginPath: localDefault, installedFrom: candidate };
+        }
+      }
       installErrors.push(`install ${candidate} failed: ${message}`);
     }
   }

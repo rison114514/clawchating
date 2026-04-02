@@ -13,7 +13,13 @@
 
 ### 处理状态
 - 已定位根因并确认。
-- 待补充项：将 `clawchating-channel` 插件目录与清单文件纳入项目并提交，随后重新执行注册脚本。
+- 已完成修复：
+  - 将 `extensions/clawchating-channel/` 插件产物（`openclaw.plugin.json`、`package.json`、`dist/index.js`）纳入仓库，支持新用户零预装场景。
+  - 增强 `scripts/register-clawchating-channel.mjs`：
+    - 增加仓库相对路径候选，避免非项目根目录执行时找不到本地插件。
+    - 增加混合输出 JSON 解析能力，兼容 OpenClaw CLI 在 JSON 前输出告警日志的场景。
+    - 当安装返回 "plugin already exists" 时转为回收已存在插件目录并继续注册。
+  - 已本地验证注册脚本可成功执行。
 
 ### 备注
 - 后续建议在发布前增加“插件完整性检查”，避免注册流程在缺失插件产物时直接失败。
