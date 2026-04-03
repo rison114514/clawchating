@@ -5,8 +5,16 @@ import os from 'os';
 import { appendSessionMessage, initializeGroupSessions } from '@/lib/session-runtime';
 
 const groupsPath = path.join(process.cwd(), 'workspaces', 'groups.json');
-const guideSourcePath = path.join(process.cwd(), 'src', 'doc', 'OPENCLAW_USAGE_GUIDE.md');
-const guideTargetName = 'OPENCLAW_USAGE_GUIDE.md';
+const bootstrapDocs: Array<{ sourcePath: string; targetName: string }> = [
+  {
+    sourcePath: path.join(process.cwd(), 'src', 'doc', 'OPENCLAW_USAGE_GUIDE.md'),
+    targetName: 'OPENCLAW_USAGE_GUIDE.md',
+  },
+  {
+    sourcePath: path.join(process.cwd(), 'src', 'doc', 'OPENCLAW_SKILLS_解析大全.md'),
+    targetName: 'OPENCLAW_SKILLS_解析大全.md',
+  },
+];
 
 async function getGroups() {
   try {
@@ -143,20 +151,22 @@ async function writeGroupContextForMembers(groupId: string, channelId: string, m
   await fs.writeFile(contextPath, sectionBody, 'utf-8');
 }
 
-async function copyOpenClawGuideForNewGroup(groupId: string) {
+async function copyBootstrapDocsForNewGroup(groupId: string) {
   if (!groupId) return;
 
   const sharedWorkspaceDir = path.resolve(path.join(process.cwd(), 'workspaces', groupId));
   await fs.mkdir(sharedWorkspaceDir, { recursive: true });
 
-  try {
-    await fs.stat(guideSourcePath);
-  } catch {
-    return;
-  }
+  for (const doc of bootstrapDocs) {
+    try {
+      await fs.stat(doc.sourcePath);
+    } catch {
+      continue;
+    }
 
-  const targetPath = path.join(sharedWorkspaceDir, guideTargetName);
-  await fs.copyFile(guideSourcePath, targetPath);
+    const targetPath = path.join(sharedWorkspaceDir, doc.targetName);
+    await fs.copyFile(doc.sourcePath, targetPath);
+  }
 }
 
 async function appendJoinInitializationPrompt(
@@ -220,7 +230,7 @@ export async function POST(req: Request) {
   groups.push(newGroup);
   await saveGroups(groups);
   await ensureGroupWorkspaceMounts(newGroup.id, Array.isArray(newGroup.members) ? newGroup.members : []);
-  await copyOpenClawGuideForNewGroup(newGroup.id);
+  await copyBootstrapDocsForNewGroup(newGroup.id);
 
   if (Array.isArray(newGroup.members) && newGroup.members.length > 0) {
     const initializedMembers = await initializeGroupSessions({

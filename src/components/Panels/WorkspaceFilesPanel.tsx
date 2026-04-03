@@ -1,5 +1,5 @@
-import { useState, useEffect, type ReactNode } from 'react';
-import { X, Search, FileText, Save, Edit2, Trash, FolderClosed, ChevronRight } from 'lucide-react';
+import { useState, useEffect, useRef, type ChangeEvent, type ReactNode } from 'react';
+import { X, Search, FileText, Save, Edit2, Trash, FolderClosed, ChevronRight, RefreshCw, Upload, Download } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { WorkspaceEntry } from '../../lib/types';
 
@@ -25,6 +25,9 @@ export function WorkspaceFilesPanel({ isOpen, onClose, workspaceId }: WorkspaceF
   const [isEditingContent, setIsEditingContent] = useState(false);
   const [isRenaming, setIsRenaming] = useState(false);
   const [renameInput, setRenameInput] = useState('');
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [isUploading, setIsUploading] = useState(false);
+  const uploadInputRef = useRef<HTMLInputElement>(null);
 
   const fetchDir = async (dirPath: string): Promise<TreeEntry[]> => {
     const query = new URLSearchParams({ scopedId: workspaceId, dir: dirPath });
@@ -58,6 +61,80 @@ export function WorkspaceFilesPanel({ isOpen, onClose, workspaceId }: WorkspaceF
       setFiles(rootEntries);
     } catch (e) {
       console.error(e);
+    }
+  };
+
+  const refreshWorkspace = async () => {
+    try {
+      setIsRefreshing(true);
+      await fetchFiles();
+
+      if (activeEntry && !activeEntry.isDirectory) {
+        const res = await fetch(`/api/workspace/files?scopedId=${workspaceId}&filename=${encodeURIComponent(activeEntry.path)}`);
+        const data = await res.json();
+        setFileContent(data.content || '');
+      }
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setIsRefreshing(false);
+    }
+  };
+
+  const getUploadBaseDir = () => {
+    if (!activeEntry) return '';
+    if (activeEntry.isDirectory) return activeEntry.path;
+    const lastSlash = activeEntry.path.lastIndexOf('/');
+    return lastSlash < 0 ? '' : activeEntry.path.slice(0, lastSlash);
+  };
+
+  const handleUploadSelect = async (e: ChangeEvent<HTMLInputElement>) => {
+    const selected = e.target.files;
+    if (!selected || selected.length === 0) return;
+
+    try {
+      setIsUploading(true);
+      const baseDir = getUploadBaseDir();
+
+      for (const file of Array.from(selected)) {
+        const content = await file.text();
+        const normalizedName = file.name.replace(/^\/+/, '');
+        const targetPath = baseDir ? `${baseDir}/${normalizedName}` : normalizedName;
+
+        await fetch(`/api/workspace/files?scopedId=${workspaceId}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ filename: targetPath, content }),
+        });
+      }
+
+      await refreshWorkspace();
+    } catch (error) {
+      console.error(error);
+      alert('文件上传失败，请查看控制台日志。');
+    } finally {
+      setIsUploading(false);
+      if (uploadInputRef.current) {
+        uploadInputRef.current.value = '';
+      }
+    }
+  };
+
+  const handleDownloadActiveFile = () => {
+    if (!activeEntry || activeEntry.isDirectory) return;
+    try {
+      const blob = new Blob([fileContent], { type: 'application/octet-stream;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = activeEntry.name;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      console.error(error);
+      alert('文件下载失败，请重试。');
     }
   };
 
@@ -255,6 +332,35 @@ export function WorkspaceFilesPanel({ isOpen, onClose, workspaceId }: WorkspaceF
         {/* Left Side: File List */}
         <div className="w-48 border-r border-neutral-800 flex flex-col bg-neutral-950 shrink-0">
           <div className="p-3 border-b border-neutral-800">
+            <div className="flex items-center gap-1.5 mb-2">
+              <button
+                type="button"
+                onClick={refreshWorkspace}
+                disabled={isRefreshing}
+                className="flex-1 inline-flex items-center justify-center gap-1.5 rounded-lg border border-neutral-700 px-2 py-1.5 text-xs text-neutral-300 hover:bg-neutral-800 disabled:opacity-60"
+                title="刷新文件列表"
+              >
+                <RefreshCw className={cn('w-3.5 h-3.5', isRefreshing && 'animate-spin')} />
+                刷新
+              </button>
+              <button
+                type="button"
+                onClick={() => uploadInputRef.current?.click()}
+                disabled={isUploading}
+                className="flex-1 inline-flex items-center justify-center gap-1.5 rounded-lg border border-neutral-700 px-2 py-1.5 text-xs text-neutral-300 hover:bg-neutral-800 disabled:opacity-60"
+                title="上传文件"
+              >
+                <Upload className="w-3.5 h-3.5" />
+                上传
+              </button>
+              <input
+                ref={uploadInputRef}
+                type="file"
+                multiple
+                className="hidden"
+                onChange={handleUploadSelect}
+              />
+            </div>
             <div className="relative">
               <Search className="w-4 h-4 text-neutral-500 absolute left-3 top-1/2 -translate-y-1/2" />
               <input 
@@ -302,6 +408,13 @@ export function WorkspaceFilesPanel({ isOpen, onClose, workspaceId }: WorkspaceF
                 </div>
                 {!isRenaming && !activeEntry.isDirectory && (
                    <div className="flex items-center gap-1 shrink-0">
+                     <button
+                       onClick={handleDownloadActiveFile}
+                       className="p-1.5 rounded text-neutral-400 hover:bg-neutral-800 hover:text-white transition-colors"
+                       title="下载文件"
+                     >
+                       <Download className="w-4 h-4" />
+                     </button>
                      <button 
                        onClick={() => setIsEditingContent(!isEditingContent)}
                        className="p-1.5 rounded text-neutral-400 hover:bg-neutral-800 hover:text-white transition-colors"
